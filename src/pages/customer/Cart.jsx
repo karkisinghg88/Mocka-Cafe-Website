@@ -4,7 +4,7 @@ import { Plus, Minus, Trash2, ShoppingBag, QrCode, MapPin, Check } from 'lucide-
 import { useCart } from '../../context/CartContext'
 import { useAuth } from '../../context/AuthContext'
 import { getSettings, createOrder, getAddresses, addAddress, deleteAddress } from '../../lib/db'
-import { rupees, isOpenNow, distanceKm, CAFE } from '../../lib/format'
+import { rupees, openStatus, distanceKm, CAFE } from '../../lib/format'
 import { Button, Card, Input, Textarea, EmptyState, Spinner } from '../../components/ui'
 
 export default function Cart() {
@@ -38,6 +38,7 @@ export default function Cart() {
 
   const deliveryCharge = Number(settings.delivery_charge || 0)
   const total = subtotal + deliveryCharge
+  const status = openStatus(settings.closed_dates)
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }))
 
   if (lines.length === 0) {
@@ -67,10 +68,7 @@ export default function Cart() {
   }
 
   const place = async () => {
-    if (!isOpenNow()) {
-      alert(`We are open ${CAFE.openHour > 12 ? CAFE.openHour - 12 : CAFE.openHour} AM to ${CAFE.closeHour - 12} PM (Delhi time). Please order during these hours.`)
-      return
-    }
+    if (!status.open) { alert(status.reason + ' Please order on the next open day.'); return }
     if (!form.name.trim()) { alert('Please add your name.'); return }
     const phone = form.phone.replace(/\s/g, '')
     if (phone.replace(/\D/g, '').length < 10) { alert('Please add a valid phone number we can call you on.'); return }
@@ -122,6 +120,12 @@ export default function Cart() {
   return (
     <div className="space-y-4">
       <h2 className="text-xl font-bold">Your order</h2>
+
+      {!status.open && (
+        <div className="rounded-xl border border-yellow-600/40 bg-yellow-500/10 px-4 py-3 text-center text-sm text-yellow-300">
+          {status.reason} Orders cannot be placed right now.
+        </div>
+      )}
 
       <div className="space-y-2">
         {lines.map((l) => (
@@ -214,8 +218,8 @@ export default function Cart() {
         <div className="flex justify-between border-t border-cafe-line pt-2 text-base font-bold"><span>Total</span><span className="text-cafe-accent">{rupees(total)}</span></div>
       </Card>
 
-      <Button onClick={place} disabled={placing} className="w-full">
-        {placing ? 'Placing…' : `Place order · ${rupees(total)}`}
+      <Button onClick={place} disabled={placing || !status.open} className="w-full">
+        {placing ? 'Placing…' : !status.open ? 'Closed right now' : `Place order · ${rupees(total)}`}
       </Button>
     </div>
   )
