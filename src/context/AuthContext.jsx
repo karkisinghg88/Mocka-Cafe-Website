@@ -34,20 +34,14 @@ export function AuthProvider({ children }) {
     return () => sub.subscription.unsubscribe()
   }, [loadProfile])
 
-  const signUp = async ({ email, password, fullName, phone, role = 'customer', key = '' }) => {
+  const signUp = async ({ email, password, fullName, phone }) => {
+    // Public signup is always a customer. There is no role key in the client.
+    // Staff accounts are created by the owner via adminCreateStaff, which uses
+    // the admin-only `admin_set_role` server function. See supabase/14_security.sql.
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
-      options: {
-        data: {
-          full_name: fullName,
-          phone,
-          // The DB trigger decides the real role: it only grants admin/chef
-          // when the matching access key is supplied. Otherwise -> customer.
-          requested_role: role,
-          signup_key: key,
-        },
-      },
+      options: { data: { full_name: fullName, phone } },
     })
     if (error) throw error
     return data

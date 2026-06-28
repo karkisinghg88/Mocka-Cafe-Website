@@ -5,6 +5,8 @@ import DemoBanner from './components/DemoBanner'
 import Landing from './pages/Landing'
 import Login from './pages/Login'
 import Signup from './pages/Signup'
+import Terms from './pages/Terms'
+import Privacy from './pages/Privacy'
 
 // Admin
 import AdminLayout from './pages/admin/AdminLayout'
@@ -71,6 +73,8 @@ export default function App() {
     <DemoBanner />
     <Routes>
       <Route path="/" element={<Landing />} />
+      <Route path="/terms" element={<Terms />} />
+      <Route path="/privacy" element={<Privacy />} />
       <Route path="/login" element={redirectOrWait(<Login />)} />
       <Route path="/signup" element={redirectOrWait(<Signup />)} />
 
