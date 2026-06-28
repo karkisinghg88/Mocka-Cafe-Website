@@ -29,8 +29,8 @@ export default function CustomerLayout() {
         <header className="sticky top-0 z-30 flex items-center justify-between border-b border-cafe-line bg-cafe-bg/95 px-4 py-3 backdrop-blur">
           <HeaderLeft homePath="/app" tabs={tabs} brand={
             <div className="flex items-center gap-2">
-              <img src="/coffee.svg" alt="" className="h-8 w-8" />
-              <h1 className="text-lg font-black text-cafe-accent">{CAFE.name}</h1>
+              <img src="/logo.svg" alt="Mocka Cafe logo" className="h-8 w-8" />
+              <h1 className="font-display text-lg font-extrabold text-cafe-accent">{CAFE.name}</h1>
             </div>
           } />
           <div className="flex items-center gap-1">
