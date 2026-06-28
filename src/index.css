@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+@theme {
+  --color-cafe-bg: #1a1a1a;
+  --color-cafe-card: #242424;
+  --color-cafe-line: #343434;
+  --color-cafe-accent: #e08a2b;
+  --color-cafe-accent-dark: #b86d1c;
+  --color-cafe-muted: #9a9a9a;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-cafe-bg);
+  color: #f4f4f4;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+
+/* Hide number input spinners for a cleaner mobile UI */
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type=number] { -moz-appearance: textfield; }
+
+.safe-bottom { padding-bottom: env(safe-area-inset-bottom); }

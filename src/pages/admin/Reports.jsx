@@ -1,0 +1,575 @@
+import { useCallback, useEffect, useState } from 'react'
+import {
+  TrendingUp, TrendingDown, Flame, Coins, Snail, AlertTriangle,
+  PackageX, ChevronDown, Lightbulb, Clock, ShoppingBasket, Trash2, Heart, ArrowUpNarrowWide, ShoppingCart,
+  Banknote, QrCode, Download, Plus, Flame as Fuel, Receipt, Star, Sparkles,
+} from 'lucide-react'
+import { supabase } from '../../lib/supabase'
+import { getShopkeepers, getSettings, getExpenses, addExpense, deleteExpense } from '../../lib/db'
+import { generateAiReport } from '../../lib/ai'
+import { rupees, todayISO, cycleRange } from '../../lib/format'
+import { Card, Spinner, Badge, Button } from '../../components/ui'
+import RestockModal from '../../components/RestockModal'
+
+const hourLabel = (h) => { const ap = h < 12 ? 'AM' : 'PM'; const hr = h % 12 || 12; return `${hr} ${ap}` }
+
+export default function Reports() {
+  const [month, setMonth] = useState(todayISO().slice(0, 7))
+  const [loading, setLoading] = useState(true)
+  const [data, setData] = useState(null)
+  const [restock, setRestock] = useState(null)
+  const [ai, setAi] = useState({ text: '', loading: false, error: '' })
+
+  const runAi = async () => {
+    setAi({ text: '', loading: true, error: '' })
+    try { setAi({ text: await generateAiReport(data), loading: false, error: '' }) }
+    catch (e) { setAi({ text: '', loading: false, error: e.message }) }
+  }
+
+  const run = useCallback(async () => {
+    const settings = await getSettings()
+    const cycleDay = Number(settings.report_cycle_day || 1)
+    const { start, end, label } = cycleRange(month, cycleDay)
+    const [{ data: orders }, { data: purchases }, { data: inventory }, { data: procured }, shopkeepers, expenses] = await Promise.all([
+      supabase.from('orders')
+        .select('total, delivery_charge, type, business_date, created_at, payment_method, cash_amount, upi_amount, rating, order_items(name_snapshot, price_snapshot, quantity, cost_snapshot, is_available)')
+        .gte('business_date', start).lte('business_date', end)
+        .or('payment_status.eq.received,status.eq.paid,status.eq.delivered'),
+      supabase.from('inventory_purchases').select('item_id, qty, total_cost, purchased_on').gte('purchased_on', start).lte('purchased_on', end),
+      supabase.from('inventory_items').select('*').order('current_qty'),
+      supabase.from('purchase_items').select('shopkeeper_id, qty, unit_price, payment_method').eq('status', 'purchased').gte('business_date', start).lte('business_date', end),
+      getShopkeepers(),
+      getExpenses(start, end),
+    ])
+
+    const today = todayISO()
+    let sales = 0, cogs = 0, salesToday = 0, cashTotal = 0, upiTotal = 0
+    const byProduct = {}
+    const hours = Array(24).fill(0)
+
+    ;(orders || []).forEach((o) => {
+      sales += Number(o.total)
+      if (o.business_date === today) salesToday += Number(o.total)
+      if (o.created_at) hours[new Date(o.created_at).getHours()] += Number(o.total)
+
+      // Cash vs UPI. Older/simple orders that weren't split-tracked fall back to method.
+      let c = Number(o.cash_amount) || 0, u = Number(o.upi_amount) || 0
+      if (c + u === 0) { if (o.payment_method === 'upi') u = Number(o.total); else c = Number(o.total) }
+      cashTotal += c; upiTotal += u
+      ;(o.order_items || []).forEach((it) => {
+        if (it.is_available === false) return
+        const rev = Number(it.price_snapshot) * it.quantity
+        const cost = Number(it.cost_snapshot) * it.quantity
+        cogs += cost
+        const p = (byProduct[it.name_snapshot] ||= { units: 0, revenue: 0, cost: 0, ratingSum: 0, ratingCount: 0 })
+        p.units += it.quantity; p.revenue += rev; p.cost += cost
+        if (o.rating) { p.ratingSum += Number(o.rating); p.ratingCount += 1 }
+      })
+    })
+
+    const products = Object.entries(byProduct).map(([name, v]) => ({
+      name, units: v.units, revenue: v.revenue, cost: v.cost,
+      profit: v.revenue - v.cost, margin: v.revenue ? ((v.revenue - v.cost) / v.revenue) * 100 : 0,
+      noRecipe: v.cost === 0,
+      avgRating: v.ratingCount ? v.ratingSum / v.ratingCount : null, ratingCount: v.ratingCount,
+    })).sort((a, b) => b.revenue - a.revenue)
+
+    const rated = products.filter((p) => p.avgRating != null)
+    const avgFoodRating = rated.length ? rated.reduce((s, p) => s + p.avgRating, 0) / rated.length : null
+    const lowRated = [...rated].sort((a, b) => a.avgRating - b.avgRating).slice(0, 3)
+    const topRated = [...rated].sort((a, b) => b.avgRating - a.avgRating).slice(0, 3)
+
+    const orderCount = (orders || []).length
+    const lowStock = (inventory || [])
+      .filter((i) => Number(i.low_stock_threshold) > 0 && Number(i.current_qty) <= Number(i.low_stock_threshold))
+      .sort((a, b) => (a.current_qty / (a.low_stock_threshold || 1)) - (b.current_qty / (b.low_stock_threshold || 1)))
+
+    // ---- Procurement insight: frequency + spend + shelf life ----
+    const invMap = Object.fromEntries((inventory || []).map((i) => [i.id, i]))
+    const buys = {}
+    ;(purchases || []).forEach((p) => {
+      const inv = invMap[p.item_id]; if (!inv) return
+      const b = (buys[p.item_id] ||= { name: inv.name, unit: inv.unit, shelf: Number(inv.shelf_life_days), qty: 0, spend: 0, times: 0 })
+      b.qty += Number(p.qty); b.spend += Number(p.total_cost); b.times += 1
+    })
+    const procurement = Object.values(buys).sort((a, b) => b.spend - a.spend)
+    const bulkCandidates = procurement.filter((p) => p.times >= 2 && (p.shelf === 0 || p.shelf >= 7))
+    const dailyItems = procurement.filter((p) => p.shelf === 1)
+    const shopMap = Object.fromEntries((shopkeepers || []).map((s) => [s.id, s.shop_name || s.full_name]))
+    const byShopSpend = {}
+    ;(procured || []).forEach((p) => {
+      const name = shopMap[p.shopkeeper_id] || 'Direct store'
+      byShopSpend[name] = (byShopSpend[name] || 0) + Number(p.qty) * Number(p.unit_price)
+    })
+    const shopSpend = Object.entries(byShopSpend).map(([name, spend]) => ({ name, spend })).sort((a, b) => b.spend - a.spend)
+
+    // ---- Expenses + net profit (rent/electricity logged per cycle, with dates) ----
+    const ofType = (t) => (expenses || []).filter((e) => e.type === t)
+    const sum = (list) => list.reduce((s, e) => s + Number(e.amount), 0)
+    const rentList = ofType('rent'), elecList = ofType('electricity'), cylinderList = ofType('cylinder'), otherList = ofType('other')
+    const rent = sum(rentList), electricity = sum(elecList), cylinderTotal = sum(cylinderList), otherTotal = sum(otherList)
+    const grossProfit = sales - cogs
+    const totalExpenses = rent + electricity + cylinderTotal + otherTotal
+    const netProfit = grossProfit - totalExpenses
+
+    const costed = products.filter((p) => !p.noRecipe)
+    setData({
+      periodLabel: label, start, end,
+      avgFoodRating, lowRated, topRated, ratedCount: rated.length,
+      rent, electricity, rentList, elecList, cylinderList, otherList, cylinderTotal, otherTotal, totalExpenses, netProfit,
+      procurement, bulkCandidates, dailyItems, shopSpend,
+      sales, cogs, grossProfit, salesToday, orderCount,
+      cashTotal, upiTotal,
+      products, lowStock, hours,
+      purchaseTotal: (purchases || []).reduce((s, p) => s + Number(p.total_cost), 0),
+      aov: orderCount ? sales / orderCount : 0,
+      bestSeller: [...products].sort((a, b) => b.units - a.units)[0],
+      slowMover: [...products].sort((a, b) => a.units - b.units)[0],
+      topProfit: [...products].sort((a, b) => b.profit - a.profit)[0],
+      losers: products.filter((p) => p.profit < 0 || (!p.noRecipe && p.margin < 15)),
+      highMargin: [...costed].sort((a, b) => b.margin - a.margin).slice(0, 3),
+      lowMargin: [...costed].sort((a, b) => a.margin - b.margin).slice(0, 3),
+    })
+    setLoading(false)
+  }, [month])
+
+  useEffect(() => { setLoading(true); run() }, [run])
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-bold">Reports</h2>
+          {data && <p className="text-xs text-cafe-muted">Cycle: {data.periodLabel}</p>}
+        </div>
+        <input type="month" value={month} onChange={(e) => setMonth(e.target.value)}
+          className="rounded-xl bg-cafe-card border border-cafe-line px-3 py-2 text-sm" />
+      </div>
+
+      {loading || !data ? <Spinner /> : (
+        <>
+          <Card className={`p-5 ${data.netProfit >= 0 ? 'border-emerald-600/40' : 'border-red-600/40'}`}>
+            <p className="text-xs uppercase tracking-wide text-cafe-muted">Net profit / loss</p>
+            <p className={`mt-1 text-4xl font-black ${data.netProfit >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {data.netProfit < 0 ? '-' : ''}{rupees(Math.abs(data.netProfit))}
+            </p>
+            <div className="mt-3 space-y-1 border-t border-cafe-line pt-3 text-sm">
+              <Line label="Sales" value={rupees(data.sales)} />
+              <Line label="Less cost of goods" value={rupees(data.cogs)} red />
+              <Line label="Less expenses (rent, bills, gas)" value={rupees(data.totalExpenses)} red />
+              <div className="flex justify-between border-t border-cafe-line pt-1 font-bold">
+                <span>Net</span><span className={data.netProfit >= 0 ? 'text-emerald-400' : 'text-red-400'}>{rupees(data.netProfit)}</span>
+              </div>
+            </div>
+          </Card>
+
+          {/* AI report */}
+          <Card className="p-4">
+            <div className="flex items-center justify-between">
+              <p className="flex items-center gap-2 font-semibold"><Sparkles size={16} className="text-cafe-accent" /> AI report</p>
+              <Button className="px-3 py-2" disabled={ai.loading} onClick={runAi}>{ai.loading ? 'Thinking…' : 'Generate'}</Button>
+            </div>
+            {ai.error && <p className="mt-2 text-sm text-red-400">{ai.error}</p>}
+            {ai.text && <p className="mt-2 whitespace-pre-line text-sm leading-relaxed text-cafe-muted">{ai.text}</p>}
+            {!ai.text && !ai.error && <p className="mt-2 text-xs text-cafe-muted">Get an AI written summary and suggestions for this cycle. Add your Gemini key in Settings first.</p>}
+          </Card>
+
+          <div className="grid grid-cols-2 gap-3">
+            <Card className="p-4">
+              <p className="text-xs text-cafe-muted">Sales today</p>
+              <p className="mt-1 text-2xl font-black text-cafe-accent">{rupees(data.salesToday)}</p>
+            </Card>
+            <button onClick={() => downloadReport(data, month)}
+              className="flex flex-col items-center justify-center gap-1 rounded-2xl border border-cafe-line bg-cafe-card p-4 text-cafe-accent">
+              <Download size={22} /><span className="text-sm font-semibold">Download report</span>
+            </button>
+          </div>
+
+          {/* Cash vs UPI */}
+          <div className="grid grid-cols-2 gap-3">
+            <Card className="p-4">
+              <div className="flex items-center gap-2 text-emerald-400"><Banknote size={16} /><span className="text-xs text-cafe-muted">Cash collected</span></div>
+              <p className="mt-1 text-xl font-black">{rupees(data.cashTotal)}</p>
+            </Card>
+            <Card className="p-4">
+              <div className="flex items-center gap-2 text-blue-400"><QrCode size={16} /><span className="text-xs text-cafe-muted">UPI collected</span></div>
+              <p className="mt-1 text-xl font-black">{rupees(data.upiTotal)}</p>
+            </Card>
+          </div>
+
+          {/* EXPENSES */}
+          <ExpensesSection data={data} onReload={run} />
+
+          {/* LOW IN STOCK */}
+          <LowStockSection items={data.lowStock} onRestock={setRestock} />
+
+          {/* Insights */}
+          {data.products.length > 0 && (
+            <div className="grid grid-cols-2 gap-3">
+              <Insight icon={Flame} color="text-orange-400" label="Best seller" value={data.bestSeller?.name} sub={`${data.bestSeller?.units} sold`} />
+              <Insight icon={Coins} color="text-emerald-400" label="Most profit" value={data.topProfit?.name} sub={rupees(data.topProfit?.profit || 0)} />
+              <Insight icon={Snail} color="text-blue-400" label="Slowest mover" value={data.slowMover?.name} sub={`${data.slowMover?.units} sold`} />
+              <Insight icon={AlertTriangle} color="text-red-400" label="Needs attention"
+                value={data.losers.length ? data.losers[0].name : 'All healthy 🎉'} sub={data.losers.length ? `${data.losers.length} low margin` : ''} />
+            </div>
+          )}
+
+          {/* Product breakdown */}
+          <Card className="p-4">
+            <p className="mb-3 text-sm font-semibold">Product performance ({data.products.length})</p>
+            {data.products.length === 0 ? (
+              <p className="text-sm text-cafe-muted">No sales yet this month.</p>
+            ) : (
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 border-b border-cafe-line pb-2 text-[11px] uppercase text-cafe-muted">
+                  <span className="flex-1">Item</span><span className="w-10 text-right">Qty</span><span className="w-20 text-right">Sales</span><span className="w-20 text-right">Profit</span>
+                </div>
+                {data.products.map((p) => (
+                  <div key={p.name} className="flex items-center gap-2 py-1.5 text-sm">
+                    <span className="min-w-0 flex-1 truncate">{p.name}</span>
+                    <span className="w-10 text-right text-cafe-muted">{p.units}</span>
+                    <span className="w-20 text-right">{rupees(p.revenue)}</span>
+                    <span className={`w-20 text-right font-semibold ${p.profit >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{rupees(p.profit)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+
+          {/* FOOD QUALITY (customer ratings) */}
+          {data.avgFoodRating != null && (
+            <Card className="p-4">
+              <div className="flex items-center justify-between">
+                <p className="flex items-center gap-2 text-sm font-semibold"><Star size={16} className="text-cafe-accent" /> Food quality</p>
+                <p className="text-sm"><span className="text-lg font-black text-cafe-accent">{data.avgFoodRating.toFixed(1)}</span><span className="text-cafe-muted">/5 · {data.ratedCount} rated</span></p>
+              </div>
+              {data.lowRated.length > 0 && (
+                <div className="mt-2 text-sm">
+                  <p className="text-xs text-red-400">Lowest rated, look into these:</p>
+                  {data.lowRated.map((p) => (
+                    <div key={p.name} className="flex justify-between py-0.5">
+                      <span>{p.name}</span><span className="text-cafe-muted">{p.avgRating.toFixed(1)} ★ ({p.ratingCount})</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {data.topRated.length > 0 && (
+                <p className="mt-2 text-xs text-emerald-400">Best loved: {data.topRated.map((p) => `${p.name} (${p.avgRating.toFixed(1)}★)`).join(', ')}</p>
+              )}
+            </Card>
+          )}
+
+          {/* PROCUREMENT */}
+          <ProcurementSection data={data} />
+
+          {/* SUGGESTIONS */}
+          <SuggestionsSection data={data} />
+        </>
+      )}
+
+      {restock && <RestockModal item={restock} onClose={() => setRestock(null)} onDone={run} />}
+    </div>
+  )
+}
+
+function Line({ label, value, red }) {
+  return (
+    <div className="flex justify-between">
+      <span className="text-cafe-muted">{label}</span>
+      <span className={red ? 'text-red-300' : ''}>{value}</span>
+    </div>
+  )
+}
+
+function ExpensesSection({ data, onReload }) {
+  const [open, setOpen] = useState(false)
+  const remove = async (id) => { await deleteExpense(id); onReload() }
+  const dDate = (d) => new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+
+  return (
+    <Card className="overflow-hidden">
+      <button onClick={() => setOpen((o) => !o)} className="flex w-full items-center justify-between p-4 text-left">
+        <span className="flex items-center gap-2"><Receipt size={18} className="text-cafe-accent" /><span className="font-bold">Expenses</span>
+          <Badge className="bg-red-500/15 text-red-400">{rupees(data.totalExpenses)}</Badge></span>
+        <ChevronDown size={18} className={`text-cafe-muted transition ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="space-y-4 border-t border-cafe-line p-4 text-sm">
+          <p className="text-xs text-cafe-muted">Add this cycle's bills with their payment date. Amounts can differ every month.</p>
+
+          <ExpenseGroup title="Shop rent" type="rent" list={data.rentList} start={data.start}
+            onReload={onReload} onRemove={remove} dDate={dDate} />
+          <ExpenseGroup title="Electricity bill" type="electricity" list={data.elecList} start={data.start}
+            onReload={onReload} onRemove={remove} dDate={dDate} />
+          <ExpenseGroup title="Gas cylinders" type="cylinder" list={data.cylinderList} start={data.start} withQty
+            onReload={onReload} onRemove={remove} dDate={dDate} />
+          <ExpenseGroup title="Other expenses" type="other" list={data.otherList} start={data.start} withLabel
+            onReload={onReload} onRemove={remove} dDate={dDate} />
+
+          <div className="flex justify-between border-t border-cafe-line pt-2 font-bold">
+            <span>Total expenses</span><span className="text-red-400">{rupees(data.totalExpenses)}</span>
+          </div>
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function ExpenseGroup({ title, type, list, start, withQty, withLabel, onReload, onRemove, dDate }) {
+  const [f, setF] = useState({ label: '', qty: '', amount: '', date: start })
+  const set = (k) => (e) => setF((x) => ({ ...x, [k]: e.target.value }))
+  const add = async () => {
+    if (!f.amount) return
+    await addExpense({ type, label: withLabel ? (f.label || 'Other') : title, qty: f.qty || 1, amount: f.amount, date: f.date || start })
+    setF({ label: '', qty: '', amount: '', date: start }); onReload()
+  }
+  return (
+    <div>
+      <p className="mb-1 font-semibold">{title}</p>
+      {list.map((e) => (
+        <div key={e.id} className="flex items-center justify-between py-0.5">
+          <span className="text-cafe-muted">{withLabel ? e.label : withQty ? `${e.qty} cyl` : ''}{(withLabel || withQty) ? ' · ' : ''}{dDate(e.expense_date)}</span>
+          <span className="flex items-center gap-2">{rupees(e.amount)}<button onClick={() => onRemove(e.id)} className="text-cafe-muted hover:text-red-400"><Trash2 size={14} /></button></span>
+        </div>
+      ))}
+      <div className="mt-1 flex flex-wrap items-center gap-2">
+        {withLabel && <input placeholder="what for" value={f.label} onChange={set('label')} className="min-w-0 flex-1 rounded-lg bg-cafe-bg border border-cafe-line px-2 py-1.5" />}
+        {withQty && <input type="number" min="1" placeholder="qty" value={f.qty} onChange={set('qty')} className="w-14 rounded-lg bg-cafe-bg border border-cafe-line px-2 py-1.5" />}
+        <input type="number" min="0" placeholder="₹ amount" value={f.amount} onChange={set('amount')} className="w-24 rounded-lg bg-cafe-bg border border-cafe-line px-2 py-1.5" />
+        <input type="date" value={f.date} onChange={set('date')} className="rounded-lg bg-cafe-bg border border-cafe-line px-2 py-1.5 text-xs" />
+        <Button className="px-3 py-1.5" onClick={add}><Plus size={14} /></Button>
+      </div>
+    </div>
+  )
+}
+
+function downloadReport(data, month) {
+  const L = []
+  L.push(`Mocka Cafe, Report (${data.periodLabel})`)
+  L.push('')
+  L.push(`Sales,${data.sales}`)
+  L.push(`Cost of goods,${data.cogs}`)
+  L.push(`Gross profit,${data.grossProfit}`)
+  L.push(`Rent,${data.rent}`)
+  L.push(`Electricity,${data.electricity}`)
+  L.push(`Cylinders,${data.cylinderTotal}`)
+  L.push(`Other expenses,${data.otherTotal}`)
+  L.push(`Total expenses,${data.totalExpenses}`)
+  L.push(`NET PROFIT,${data.netProfit}`)
+  L.push(`Cash collected,${data.cashTotal}`)
+  L.push(`UPI collected,${data.upiTotal}`)
+  L.push('')
+  L.push('Product,Qty,Sales,Profit')
+  data.products.forEach((p) => L.push(`${p.name},${p.units},${p.revenue},${p.profit}`))
+  L.push('')
+  L.push('Item bought,Times,Spent')
+  data.procurement.forEach((p) => L.push(`${p.name},${p.times},${p.spend}`))
+  const blob = new Blob([L.join('\n')], { type: 'text/csv' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = `mocka-report-${month}.csv`
+  a.click()
+}
+
+function Insight({ icon: Icon, color, label, value, sub }) {
+  return (
+    <Card className="p-3">
+      <div className={`mb-1 flex items-center gap-1.5 ${color}`}><Icon size={15} /><span className="text-[11px] text-cafe-muted">{label}</span></div>
+      <p className="truncate font-bold">{value || 'n/a'}</p>
+      {sub && <p className="text-xs text-cafe-muted">{sub}</p>}
+    </Card>
+  )
+}
+
+function LowStockSection({ items, onRestock }) {
+  const [open, setOpen] = useState(true)
+  return (
+    <Card className={`overflow-hidden ${items.length ? 'border-red-600/40' : ''}`}>
+      <button onClick={() => setOpen((o) => !o)} className="flex w-full items-center justify-between p-4 text-left">
+        <span className="flex items-center gap-2">
+          <PackageX size={18} className={items.length ? 'text-red-400' : 'text-cafe-muted'} />
+          <span className="font-bold">Low in stock</span>
+          {items.length > 0 && <Badge className="bg-red-500/15 text-red-400">{items.length}</Badge>}
+        </span>
+        <ChevronDown size={18} className={`text-cafe-muted transition ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="border-t border-cafe-line p-4">
+          {items.length === 0 ? (
+            <p className="text-sm text-cafe-muted">Everything is well stocked. 🎉 Set a low-stock limit on items in Inventory to get alerts here.</p>
+          ) : (
+            <>
+              <p className="mb-3 text-xs text-cafe-muted">Buy these tomorrow morning. Restock an item and it drops off this list.</p>
+              <div className="space-y-2">
+                {items.map((it) => (
+                  <div key={it.id} className="flex items-center gap-3 rounded-xl bg-cafe-bg p-3">
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate font-semibold">{it.name}</p>
+                      <p className="text-xs text-red-400">{it.current_qty} {it.unit} left · limit {it.low_stock_threshold} {it.unit}</p>
+                    </div>
+                    <button onClick={() => onRestock(it)}
+                      className="flex items-center gap-1 rounded-lg bg-cafe-accent px-3 py-2 text-sm font-bold text-black">
+                      <ShoppingCart size={15} /> Buy
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function ProcurementSection({ data }) {
+  const [open, setOpen] = useState(false)
+  const totalSpend = data.procurement.reduce((s, p) => s + p.spend, 0)
+  return (
+    <Card className="overflow-hidden">
+      <button onClick={() => setOpen((o) => !o)} className="flex w-full items-center justify-between p-4 text-left">
+        <span className="flex items-center gap-2"><ShoppingCart size={18} className="text-cafe-accent" /><span className="font-bold">Purchasing &amp; reorder</span></span>
+        <ChevronDown size={18} className={`text-cafe-muted transition ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="space-y-4 border-t border-cafe-line p-4">
+          {data.procurement.length === 0 ? (
+            <p className="text-sm text-cafe-muted">No purchases recorded this month yet. Buy items via the Buy list and they'll show here.</p>
+          ) : (
+            <>
+              <div>
+                <div className="flex items-center justify-between text-[11px] uppercase text-cafe-muted">
+                  <span className="flex-1">Item bought</span><span className="w-12 text-right">×times</span><span className="w-20 text-right">Spent</span>
+                </div>
+                {data.procurement.map((p) => (
+                  <div key={p.name} className="flex items-center gap-2 border-t border-cafe-line py-1.5 text-sm">
+                    <span className="min-w-0 flex-1 truncate">{p.name}
+                      {p.shelf === 1 && <span className="ml-1 text-[10px] text-blue-400">daily</span>}
+                      {p.shelf >= 7 && <span className="ml-1 text-[10px] text-emerald-400">{p.shelf}d</span>}
+                    </span>
+                    <span className="w-12 text-right text-cafe-muted">{p.times}×</span>
+                    <span className="w-20 text-right font-semibold">{rupees(p.spend)}</span>
+                  </div>
+                ))}
+                <div className="mt-1 flex justify-between border-t border-cafe-line pt-2 text-sm font-bold">
+                  <span>Total bought</span><span className="text-cafe-accent">{rupees(totalSpend)}</span>
+                </div>
+              </div>
+
+              {data.bulkCandidates.length > 0 && (
+                <div className="rounded-xl border border-emerald-600/30 bg-emerald-500/5 p-3 text-sm">
+                  <p className="mb-1 font-semibold text-emerald-400">Buy these in bulk (long shelf life, bought often)</p>
+                  <p className="text-cafe-muted">{data.bulkCandidates.map((p) => p.name).join(', ')}, stocking a month at once saves trips.</p>
+                </div>
+              )}
+              {data.dailyItems.length > 0 && (
+                <div className="rounded-xl border border-blue-600/30 bg-blue-500/5 p-3 text-sm">
+                  <p className="mb-1 font-semibold text-blue-400">Daily items (don't overstock)</p>
+                  <p className="text-cafe-muted">{data.dailyItems.map((p) => p.name).join(', ')}, short shelf life, buy fresh each day.</p>
+                </div>
+              )}
+
+              {data.shopSpend.length > 0 && (
+                <div>
+                  <p className="mb-1 text-sm font-semibold">Spend by shop</p>
+                  {data.shopSpend.map((s) => (
+                    <div key={s.name} className="flex justify-between py-1 text-sm">
+                      <span className="text-cafe-muted">{s.name}</span><span className="font-semibold">{rupees(s.spend)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function SuggestionsSection({ data }) {
+  const [open, setOpen] = useState(false)
+  const peakHour = data.hours.indexOf(Math.max(...data.hours))
+  const activeHours = data.hours.map((t, h) => ({ h, t })).filter((x) => x.t > 0)
+  const slow = activeHours.length ? activeHours.reduce((a, b) => (b.t < a.t ? b : a)) : null
+  const maxHour = Math.max(1, ...data.hours)
+  const wasteTarget = data.sales * 0.03
+
+  return (
+    <Card className="overflow-hidden">
+      <button onClick={() => setOpen((o) => !o)} className="flex w-full items-center justify-between p-4 text-left">
+        <span className="flex items-center gap-2"><Lightbulb size={18} className="text-cafe-accent" /><span className="font-bold">Suggestions for you</span></span>
+        <ChevronDown size={18} className={`text-cafe-muted transition ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="space-y-4 border-t border-cafe-line p-4">
+
+          {/* Hourly sales */}
+          <Tip icon={Clock} color="text-blue-400" title="When you sell most">
+            {activeHours.length === 0 ? (
+              <p>Not enough sales yet to spot peak hours.</p>
+            ) : (
+              <>
+                <div className="my-2 space-y-1">
+                  {activeHours.map(({ h, t }) => (
+                    <div key={h} className="flex items-center gap-2">
+                      <span className="w-14 text-xs text-cafe-muted">{hourLabel(h)}</span>
+                      <div className="h-3 flex-1 overflow-hidden rounded bg-cafe-bg">
+                        <div className="h-full rounded bg-cafe-accent" style={{ width: `${(t / maxHour) * 100}%` }} />
+                      </div>
+                      <span className="w-16 text-right text-xs">{rupees(t)}</span>
+                    </div>
+                  ))}
+                </div>
+                <p><b className="text-white">Peak: {hourLabel(peakHour)} to {hourLabel((peakHour + 1) % 24)}.</b> Prep stock and staff before it. {slow && <>Slowest around <b className="text-white">{hourLabel(slow.h)}</b>, run a small offer then to pull people in.</>}</p>
+              </>
+            )}
+          </Tip>
+
+          {/* High margin focus */}
+          <Tip icon={ArrowUpNarrowWide} color="text-emerald-400" title="Push your high-margin items">
+            {data.highMargin.length === 0 ? (
+              <p>Set recipes on your items (Menu → Ingredients used) so I can find your most profitable dishes to promote.</p>
+            ) : (
+              <>
+                <p>Promote profit, not just popularity. Put these at the <b className="text-white">top of your menu</b>:</p>
+                <ul className="mt-1 list-disc pl-5">
+                  {data.highMargin.map((p) => <li key={p.name}>{p.name}, {p.margin.toFixed(0)}% margin</li>)}
+                </ul>
+                {data.lowMargin.length > 0 && <p className="mt-1 text-cafe-muted">Go easy on discounting thin-margin items: {data.lowMargin.map((p) => p.name).join(', ')}.</p>}
+              </>
+            )}
+          </Tip>
+
+          {/* AOV / add-ons */}
+          <Tip icon={ShoppingBasket} color="text-orange-400" title="Raise the average order">
+            <p>Average order is <b className="text-white">{rupees(data.aov)}</b>{data.orderCount ? ` across ${data.orderCount} orders` : ''}.</p>
+            <p className="mt-1">Add a one-tap upsell at checkout, rule of thumb: if an order is under ₹300, prompt <i>“Add Fries for ₹70 &amp; save ₹20”</i>.</p>
+            <p className="mt-1 text-cafe-muted">Pairing ideas: Burger → Fries + Cold Coffee · Noodles → Momos · Butter Chicken → Butter Naan.</p>
+          </Tip>
+
+          {/* Waste */}
+          <Tip icon={Trash2} color="text-red-400" title="Cut waste (target under 3%)">
+            <p>Most new cafes lose 5 to 15% of profit to waste. Aim to keep it under <b className="text-white">3% of sales, about {rupees(wasteTarget)}/month</b> at your current sales.</p>
+            <p className="mt-1 text-cafe-muted">Track daily: veg &amp; chicken discarded, oil replaced, unsold prepared food. Want me to add a simple <b>Waste log</b>? Just ask.</p>
+          </Tip>
+
+          {/* Loyalty */}
+          <Tip icon={Heart} color="text-pink-400" title="Bring customers back">
+            <p>A small loyalty scheme beats expensive ads. e.g. <b className="text-white">5 orders → free mocktail</b>, or <b className="text-white">₹2,000/month → 10% off next time</b>.</p>
+            <p className="mt-1 text-cafe-muted">You already capture customer phone numbers, points + last-visit can be added on top. Ask and I'll wire it up.</p>
+          </Tip>
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function Tip({ icon: Icon, color, title, children }) {
+  return (
+    <div className="rounded-xl border border-cafe-line bg-cafe-bg p-3 text-sm leading-relaxed">
+      <p className={`mb-1 flex items-center gap-2 font-semibold ${color}`}><Icon size={16} /> {title}</p>
+      <div className="text-cafe-muted [&_b]:font-semibold">{children}</div>
+    </div>
+  )
+}

@@ -1,0 +1,17 @@
+{
+  "name": "Mocka Cafe",
+  "short_name": "Mocka",
+  "description": "Mocka Cafe - order, manage and serve",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1a1a1a",
+  "theme_color": "#1a1a1a",
+  "icons": [
+    {
+      "src": "/coffee.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
