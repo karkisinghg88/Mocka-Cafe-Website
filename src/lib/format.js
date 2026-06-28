@@ -25,14 +25,44 @@ export const CAFE = {
   deliveryRadiusKm: 2,     // only deliver within 2 km of the cafe
 }
 
-// Current hour in India (IST, UTC+5:30), regardless of device timezone.
-export function istHour() {
-  const ist = new Date(Date.now() + (330 + new Date().getTimezoneOffset()) * 60000)
-  return ist.getHours()
+// "Now" as an India (IST, UTC+5:30) wall-clock Date, regardless of device
+// timezone, so getHours/getDay/getDate read IST values.
+function istNow() {
+  return new Date(Date.now() + (330 + new Date().getTimezoneOffset()) * 60000)
 }
-export function isOpenNow() {
+export function istHour() { return istNow().getHours() }
+export function istDay() { return istNow().getDay() }   // 0 Sun, 1 Mon, 2 Tue ... 6 Sat
+export function istTodayISO() {
+  const d = istNow()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+// The cafe is closed every Tuesday, by default. (Tuesday = day 2.)
+export const WEEKLY_OFF = 2
+
+// Parse the owner's saved closed dates (a JSON array of 'YYYY-MM-DD' strings).
+export function parseClosedDates(value) {
+  if (!value) return []
+  try {
+    const arr = typeof value === 'string' ? JSON.parse(value) : value
+    if (!Array.isArray(arr)) return []
+    return arr.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d))
+  } catch { return [] }
+}
+
+// Whether the cafe is open right now, with a friendly reason when it is not.
+// closedDates: array of 'YYYY-MM-DD' the owner marked closed (holidays/offs).
+export function openStatus(closedDates = []) {
+  if (istDay() === WEEKLY_OFF) return { open: false, reason: 'We are closed on Tuesdays.' }
+  if (parseClosedDates(closedDates).includes(istTodayISO()))
+    return { open: false, reason: 'We are closed today.' }
   const h = istHour()
-  return h >= CAFE.openHour && h < CAFE.closeHour
+  if (h < CAFE.openHour || h >= CAFE.closeHour) return { open: false, reason: `We are open ${CAFE.hours}.` }
+  return { open: true, reason: '' }
+}
+
+export function isOpenNow(closedDates = []) {
+  return openStatus(closedDates).open
 }
 
 // Distance in km between two lat/lng points (haversine).

@@ -4,9 +4,9 @@ import {
   MapPin, Phone, Clock, Navigation, UtensilsCrossed, Coffee, Star,
   Bike, Flame, Wallet, MessageCircle, ArrowRight,
 } from 'lucide-react'
-import { getMenu, priceLabel } from '../lib/db'
+import { getMenu, priceLabel, getSettings } from '../lib/db'
 import { useAuth } from '../context/AuthContext'
-import { CAFE, isOpenNow } from '../lib/format'
+import { CAFE, openStatus } from '../lib/format'
 
 // A few dishes to feature on the home page (highlights only).
 const FEATURE_NAMES = ['Veg Momos', 'Butter Chicken', 'Paneer Pizza', 'Chicken Fried Rice', 'Kadhai Paneer', 'Veg Manchow']
@@ -21,13 +21,16 @@ export default function Landing() {
   const navigate = useNavigate()
   const { user, role } = useAuth()
   const [highlights, setHighlights] = useState([])
-  const open = isOpenNow()
+  const [closedDates, setClosedDates] = useState([])
+  const status = openStatus(closedDates)
+  const open = status.open
 
   useEffect(() => {
     getMenu().then((m) => {
       const picks = FEATURE_NAMES.map((n) => m.find((x) => x.name === n)).filter(Boolean)
       setHighlights(picks.length ? picks : m.slice(0, 6))
     }).catch(() => {})
+    getSettings().then((s) => setClosedDates(s.closed_dates || [])).catch(() => {})
   }, [])
 
   const goOrder = () => navigate(user ? (role === 'customer' ? '/app' : '/login') : '/login')
@@ -55,7 +58,7 @@ export default function Landing() {
           <div className="absolute inset-x-0 bottom-0 px-5 pb-7">
             <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold ${open ? 'bg-emerald-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'}`}>
               <span className={`h-1.5 w-1.5 rounded-full ${open ? 'bg-emerald-400' : 'bg-red-400'}`} />
-              {open ? 'Open now' : 'Closed now'} · {CAFE.hours}
+              {open ? `Open now · ${CAFE.hours}` : status.reason}
             </span>
             <h1 className="mt-3 font-display text-[2.6rem] font-extrabold leading-[1.05] tracking-tight text-white">
               {CAFE.name}

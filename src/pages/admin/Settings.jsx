@@ -1,9 +1,15 @@
 import { useEffect, useState } from 'react'
-import { QrCode, Save } from 'lucide-react'
+import { QrCode, Save, CalendarOff, Plus, X } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { getSettings, saveSetting } from '../../lib/db'
-import { CAFE } from '../../lib/format'
+import { CAFE, parseClosedDates, istTodayISO } from '../../lib/format'
 import { Button, Card, Input, Spinner } from '../../components/ui'
+
+// Pretty label for a 'YYYY-MM-DD' string, e.g. "Sat, 4 Jul 2026".
+function dateLabel(iso) {
+  const [y, m, d] = iso.split('-').map(Number)
+  return new Date(y, m - 1, d).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })
+}
 
 export default function Settings() {
   const [loading, setLoading] = useState(true)
@@ -12,8 +18,12 @@ export default function Settings() {
   const [upiId, setUpiId] = useState('')
   const [cycleDay, setCycleDay] = useState('1')
   const [geminiKey, setGeminiKey] = useState('')
+  const [closedDates, setClosedDates] = useState([])
+  const [newDate, setNewDate] = useState('')
   const [uploading, setUploading] = useState(false)
   const [saved, setSaved] = useState(false)
+
+  const today = istTodayISO()
 
   useEffect(() => {
     getSettings().then((s) => {
@@ -22,9 +32,24 @@ export default function Settings() {
       setUpiId(s.upi_id ?? '')
       setCycleDay(s.report_cycle_day ?? '1')
       setGeminiKey(s.gemini_key ?? '')
+      // Keep only today and upcoming dates, sorted, so the list stays tidy.
+      setClosedDates(parseClosedDates(s.closed_dates).filter((d) => d >= istTodayISO()).sort())
       setLoading(false)
     })
   }, [])
+
+  const persistClosedDates = async (list) => {
+    setClosedDates(list)
+    await saveSetting('closed_dates', JSON.stringify(list))
+  }
+  const addClosedDate = async () => {
+    if (!newDate) return
+    if (newDate < today) { alert('Please pick today or an upcoming date.'); return }
+    if (closedDates.includes(newDate)) { setNewDate(''); return }
+    await persistClosedDates([...closedDates, newDate].sort())
+    setNewDate('')
+  }
+  const removeClosedDate = async (d) => { await persistClosedDates(closedDates.filter((x) => x !== d)) }
 
   const uploadQr = async (file) => {
     if (!file) return
@@ -64,6 +89,31 @@ export default function Settings() {
         <Input label="Gemini API key (for AI reports)" type="password" value={geminiKey} onChange={(e) => setGeminiKey(e.target.value)} placeholder="paste your Google Gemini key" />
         <p className="text-xs text-cafe-muted">Powers the Generate AI report button in Reports. Get a free key at aistudio.google.com.</p>
         <Button onClick={save} className="w-full"><Save size={16} /> {saved ? 'Saved!' : 'Save'}</Button>
+      </Card>
+
+      <Card className="space-y-3 p-4">
+        <div className="flex items-center gap-2"><CalendarOff size={18} className="text-cafe-accent" /><p className="font-semibold">Cafe closed days</p></div>
+        <p className="rounded-lg bg-cafe-bg px-3 py-2 text-xs text-cafe-muted">
+          Closed every <span className="font-semibold text-white">Tuesday</span> automatically. No orders can be placed on closed days.
+        </p>
+        <span className="block text-sm text-cafe-muted">Add a holiday or off day</span>
+        <div className="flex gap-2">
+          <input type="date" min={today} value={newDate} onChange={(e) => setNewDate(e.target.value)}
+            className="flex-1 rounded-xl border border-cafe-line bg-cafe-bg px-3 py-2.5 text-base outline-none focus:border-cafe-accent" />
+          <Button onClick={addClosedDate} className="px-4"><Plus size={16} /> Add</Button>
+        </div>
+        {closedDates.length === 0 ? (
+          <p className="text-xs text-cafe-muted">No extra closed days set. Add as many upcoming dates as you like.</p>
+        ) : (
+          <div className="space-y-2">
+            {closedDates.map((d) => (
+              <div key={d} className="flex items-center justify-between rounded-xl border border-cafe-line bg-cafe-bg px-3 py-2 text-sm">
+                <span>{dateLabel(d)}</span>
+                <button onClick={() => removeClosedDate(d)} aria-label={`Remove ${d}`} className="text-cafe-muted hover:text-red-400"><X size={16} /></button>
+              </div>
+            ))}
+          </div>
+        )}
       </Card>
 
       <Card className="p-4">

@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Plus, Minus, Search, ImageIcon, UtensilsCrossed } from 'lucide-react'
-import { getMenu } from '../../lib/db'
+import { getMenu, getSettings } from '../../lib/db'
 import { useCart } from '../../context/CartContext'
-import { rupees, isOpenNow, CAFE } from '../../lib/format'
+import { rupees, openStatus } from '../../lib/format'
 import { Spinner, EmptyState, Input } from '../../components/ui'
 
 function Stepper({ item, variant }) {
@@ -29,8 +29,10 @@ export default function Menu() {
   const [loading, setLoading] = useState(true)
   const [q, setQ] = useState('')
   const [cat, setCat] = useState('All')
+  const [closedDates, setClosedDates] = useState([])
 
   useEffect(() => { getMenu().then((d) => { setItems(d.filter((i) => i.is_available)); setLoading(false) }) }, [])
+  useEffect(() => { getSettings().then((s) => setClosedDates(s.closed_dates || [])).catch(() => {}) }, [])
 
   const categories = useMemo(() => ['All', ...new Set(items.map((i) => i.category))], [items])
   const filtered = items.filter((i) =>
@@ -38,13 +40,13 @@ export default function Menu() {
 
   if (loading) return <Spinner />
 
-  const open = isOpenNow()
+  const status = openStatus(closedDates)
 
   return (
     <div className="space-y-4">
-      {!open && (
+      {!status.open && (
         <div className="rounded-xl border border-yellow-600/40 bg-yellow-500/10 px-4 py-3 text-center text-sm text-yellow-300">
-          We are currently closed. Orders are taken {CAFE.openHour > 12 ? CAFE.openHour - 12 : CAFE.openHour} AM to {CAFE.closeHour - 12} PM (Delhi time).
+          {status.reason} Orders cannot be placed right now.
         </div>
       )}
       <div className="relative">
