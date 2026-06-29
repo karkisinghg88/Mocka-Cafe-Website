@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Plus, Pencil, Trash2, ShoppingCart, Boxes, Blend, X, ArrowRight, ClipboardList } from 'lucide-react'
+import { Plus, Pencil, Trash2, ShoppingCart, Boxes, Blend, X, ArrowRight, ClipboardList, ClipboardCheck } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { rupees } from '../../lib/format'
-import { convertInventory } from '../../lib/db'
+import { convertInventory, saveStockCount } from '../../lib/db'
 import { Button, Card, Input, Select, Modal, Spinner, EmptyState } from '../../components/ui'
 import RestockModal from '../../components/RestockModal'
 
@@ -20,6 +20,7 @@ export default function Inventory() {
   const [editId, setEditId] = useState(null)
   const [buy, setBuy] = useState(null) // item being restocked
   const [convert, setConvert] = useState(false) // make/convert modal
+  const [counting, setCounting] = useState(false) // stock count modal
 
   const load = async () => {
     const { data } = await supabase.from('inventory_items').select('*').order('category').order('name')
@@ -69,9 +70,14 @@ export default function Inventory() {
         <p className="mt-1 text-2xl font-black text-cafe-accent">{rupees(stockValue)}</p>
       </Card>
 
-      <Button variant="ghost" className="w-full" onClick={() => setConvert(true)} disabled={items.length === 0}>
-        <Blend size={18} /> Make / convert item (e.g. tomato + onion → puree)
-      </Button>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <Button variant="ghost" onClick={() => setConvert(true)} disabled={items.length === 0}>
+          <Blend size={18} /> Make / convert item
+        </Button>
+        <Button variant="ghost" onClick={() => setCounting(true)} disabled={items.length === 0}>
+          <ClipboardCheck size={18} /> Count stock
+        </Button>
+      </div>
 
       {items.length === 0 ? (
         <EmptyState icon={Boxes} title="No inventory yet" subtitle="Add kitchen and fridge items you buy." />
@@ -127,7 +133,37 @@ export default function Inventory() {
 
       {buy && <RestockModal item={buy} onClose={() => setBuy(null)} onDone={load} />}
       {convert && <ConvertModal items={items} onClose={() => setConvert(false)} onDone={load} />}
+      {counting && <StockCountModal items={items} onClose={() => setCounting(false)} onDone={load} />}
     </div>
+  )
+}
+
+function StockCountModal({ items, onClose, onDone }) {
+  const [vals, setVals] = useState(() => Object.fromEntries(items.map((i) => [i.id, String(i.current_qty)])))
+  const [saving, setSaving] = useState(false)
+  const submit = async () => {
+    setSaving(true)
+    try {
+      await saveStockCount(items.map((i) => ({ item_id: i.id, qty: vals[i.id] })))
+      onClose(); await onDone()
+    } catch (err) { alert(err.message) } finally { setSaving(false) }
+  }
+  return (
+    <Modal open onClose={onClose} title="Count stock">
+      <p className="mb-3 text-xs text-cafe-muted">Enter the actual quantity you have right now for each item. This corrects the stock figure and helps the monthly recipe check measure real usage. Do it now and then (e.g. weekly or month end).</p>
+      <div className="max-h-[55vh] space-y-2 overflow-y-auto">
+        {items.map((i) => (
+          <div key={i.id} className="flex items-center gap-2">
+            <span className="min-w-0 flex-1 truncate text-sm">{i.name}</span>
+            <input type="number" min="0" step="any" value={vals[i.id]}
+              onChange={(e) => setVals((v) => ({ ...v, [i.id]: e.target.value }))}
+              className="w-24 rounded-lg bg-cafe-bg border border-cafe-line px-2 py-2 text-sm" />
+            <span className="w-8 text-xs text-cafe-muted">{i.unit}</span>
+          </div>
+        ))}
+      </div>
+      <Button onClick={submit} disabled={saving} className="mt-4 w-full">{saving ? 'Saving…' : 'Save count'}</Button>
+    </Modal>
   )
 }
 

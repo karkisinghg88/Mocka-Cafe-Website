@@ -156,6 +156,30 @@ export function recipeCost(rows) {
   return rows.reduce((s, r) => s + (Number(r.qty) || 0) * Number(r.inventory_items?.unit_cost || 0), 0)
 }
 
+// All recipes at once, as { menu_item_id: [{ inventory_item_id, qty }] }. Used by
+// the monthly recipe check / calibration in Reports.
+export async function getAllRecipes() {
+  const { data } = await supabase.from('recipe_items').select('menu_item_id, inventory_item_id, qty')
+  const map = {}
+  ;(data || []).forEach((r) => { (map[r.menu_item_id] ||= []).push(r) })
+  return map
+}
+
+// ---------- Stock counts (quick physical count -> corrects current_qty) ----------
+export async function saveStockCount(rows) {
+  // rows: [{ item_id, qty }]
+  const today = todayISO()
+  const valid = rows.filter((r) => r.item_id && r.qty !== '' && r.qty != null)
+  if (valid.length === 0) return
+  await supabase.from('stock_counts').insert(
+    valid.map((r) => ({ item_id: r.item_id, counted_qty: Number(r.qty) || 0, count_date: today }))
+  )
+  // Correct each item's current stock to the counted value.
+  for (const r of valid) {
+    await supabase.from('inventory_items').update({ current_qty: Number(r.qty) || 0 }).eq('id', r.item_id)
+  }
+}
+
 // Record a purchase and top up an item's stock (recalculates unit cost).
 export async function restockItem(item, qty, totalCost) {
   const q = Number(qty), cost = Number(totalCost)

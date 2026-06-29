@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Plus, Pencil, Trash2, ImageIcon, X, FlaskConical, Layers } from 'lucide-react'
+import { Plus, Pencil, Trash2, ImageIcon, X, FlaskConical, Layers, Sparkles } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { getMenu, getRecipe, saveRecipe, saveVariants, priceLabel } from '../../lib/db'
-import { rupees } from '../../lib/format'
+import { suggestRecipe } from '../../lib/ai'
+import { rupees, convertQty, unitsForFamily } from '../../lib/format'
 import { Button, Card, Input, Select, Modal, Spinner, EmptyState } from '../../components/ui'
 
 // Section order for the grouped menu. Anything else falls under "Other".
@@ -21,7 +22,10 @@ export default function Menu() {
   const [loading, setLoading] = useState(true)
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState(EMPTY)
-  const [recipe, setRecipe] = useState([]) // [{ inventory_item_id, qty }]
+  const [recipe, setRecipe] = useState([]) // [{ inventory_item_id, qty, unit }]
+  const [batchMode, setBatchMode] = useState(true)  // batch (easy) vs per plate
+  const [batchYield, setBatchYield] = useState('')   // plates one batch makes
+  const [aiBusy, setAiBusy] = useState(false)
   const [variants, setVariants] = useState([]) // [{ name, price }]
   const [editId, setEditId] = useState(null)
   const [uploading, setUploading] = useState(false)
@@ -41,13 +45,44 @@ export default function Menu() {
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }))
 
-  const openNew = () => { setForm(EMPTY); setRecipe([]); setVariants([]); setEditId(null); setOpen(true) }
+  const openNew = () => {
+    setForm(EMPTY); setRecipe([]); setVariants([]); setEditId(null)
+    setBatchMode(true); setBatchYield(''); setOpen(true)
+  }
   const openEdit = async (it) => {
     setForm({ ...it, price: String(it.price), stock_qty: it.stock_qty ?? '' })
     setVariants((it.variants || []).map((v) => ({ name: v.name, price: String(v.price) })))
     setEditId(it.id); setOpen(true)
     const r = await getRecipe(it.id)
-    setRecipe(r.map((x) => ({ inventory_item_id: x.inventory_item_id, qty: String(x.qty) })))
+    // Stored recipes are per serving, so open in per-plate mode for editing.
+    setBatchMode(false); setBatchYield('')
+    setRecipe(r.map((x) => ({ inventory_item_id: x.inventory_item_id, qty: String(x.qty), unit: x.inventory_items?.unit || '' })))
+  }
+
+  // Per-serving quantity for a recipe row, accounting for batch mode + units.
+  const perServingQty = (row) => {
+    const iu = invMap[row.inventory_item_id]?.unit || ''
+    const inItemUnit = batchMode ? convertQty(row.qty, row.unit || iu, iu) : (Number(row.qty) || 0)
+    const y = batchMode ? (Number(batchYield) || 1) : 1
+    return y > 0 ? inItemUnit / y : 0
+  }
+
+  const aiSuggest = async () => {
+    if (!form.name.trim()) { alert('Type the item name first.'); return }
+    if (inventory.length === 0) { alert('Add your raw items in Inventory first.'); return }
+    setAiBusy(true)
+    try {
+      const rows = await suggestRecipe(form.name.trim(), inventory)
+      const mapped = rows.map((r) => {
+        const n = String(r.name || '').toLowerCase()
+        const inv = inventory.find((i) => i.name.toLowerCase() === n)
+          || inventory.find((i) => i.name.toLowerCase().includes(n) || n.includes(i.name.toLowerCase()))
+        if (!inv) return null
+        return { inventory_item_id: inv.id, qty: String(r.qty ?? ''), unit: r.unit || inv.unit }
+      }).filter(Boolean)
+      if (mapped.length === 0) { alert('AI could not match any ingredients to your inventory. Add the raw items first, then try again.'); return }
+      setBatchMode(true); setBatchYield('1'); setRecipe(mapped)
+    } catch (err) { alert(err.message) } finally { setAiBusy(false) }
   }
 
   const addVariant = () => setVariants((v) => [...v, { name: '', price: '' }])
@@ -69,8 +104,12 @@ export default function Menu() {
   }
 
   // recipe row helpers
-  const addIngredient = () => setRecipe((r) => [...r, { inventory_item_id: inventory[0]?.id || '', qty: '' }])
-  const setIngredient = (i, k, v) => setRecipe((r) => r.map((row, idx) => idx === i ? { ...row, [k]: v } : row))
+  const addIngredient = () => setRecipe((r) => [...r, { inventory_item_id: inventory[0]?.id || '', qty: '', unit: inventory[0]?.unit || '' }])
+  const setIngredient = (i, k, v) => setRecipe((r) => r.map((row, idx) => {
+    if (idx !== i) return row
+    if (k === 'inventory_item_id') return { ...row, inventory_item_id: v, unit: invMap[v]?.unit || '' }
+    return { ...row, [k]: v }
+  }))
   const removeIngredient = (i) => setRecipe((r) => r.filter((_, idx) => idx !== i))
 
   const save = async (e) => {
@@ -93,7 +132,11 @@ export default function Menu() {
         if (error) throw error
         itemId = data.id
       }
-      await saveRecipe(itemId, recipe.filter((r) => r.inventory_item_id && Number(r.qty) > 0))
+      const recipeRows = recipe
+        .filter((r) => r.inventory_item_id && Number(r.qty) > 0)
+        .map((r) => ({ inventory_item_id: r.inventory_item_id, qty: perServingQty(r) }))
+        .filter((r) => r.qty > 0)
+      await saveRecipe(itemId, recipeRows)
       await saveVariants(itemId, variants.filter((v) => v.name.trim()))
       setOpen(false); await load()
     } catch (err) { alert(err.message) }
@@ -116,7 +159,7 @@ export default function Menu() {
   const others = items.filter((i) => !known.has(i.category))
   if (others.length) grouped.push({ cat: 'Other', list: others })
 
-  const cost = recipeCostOf(recipe)
+  const cost = recipe.reduce((s, r) => s + perServingQty(r) * Number(invMap[r.inventory_item_id]?.unit_cost || 0), 0)
   const price = Number(form.price) || 0
   const profit = price - cost
 
@@ -216,28 +259,56 @@ export default function Menu() {
 
           {/* Recipe / ingredients -> inventory sync */}
           <div className="rounded-xl border border-cafe-line bg-cafe-bg p-3">
-            <div className="mb-2 flex items-center gap-2">
-              <FlaskConical size={16} className="text-cafe-accent" />
-              <p className="text-sm font-semibold">Ingredients used (per serving)</p>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <p className="flex items-center gap-2 text-sm font-semibold">
+                <FlaskConical size={16} className="text-cafe-accent" /> Ingredients used
+              </p>
+              <button type="button" onClick={aiSuggest} disabled={aiBusy}
+                className="flex items-center gap-1 rounded-lg border border-cafe-line px-2 py-1 text-xs font-semibold text-cafe-accent disabled:opacity-50">
+                <Sparkles size={13} /> {aiBusy ? 'Thinking…' : 'Suggest with AI'}
+              </button>
             </div>
-            <p className="mb-3 text-xs text-cafe-muted">Each time this item sells, these are deducted from inventory.</p>
+
+            {/* mode toggle */}
+            <div className="mb-2 grid grid-cols-2 gap-2">
+              <button type="button" onClick={() => setBatchMode(true)}
+                className={`rounded-lg border px-2 py-1.5 text-xs font-semibold ${batchMode ? 'border-cafe-accent bg-cafe-accent/10 text-cafe-accent' : 'border-cafe-line text-cafe-muted'}`}>Batch (easy)</button>
+              <button type="button" onClick={() => setBatchMode(false)}
+                className={`rounded-lg border px-2 py-1.5 text-xs font-semibold ${!batchMode ? 'border-cafe-accent bg-cafe-accent/10 text-cafe-accent' : 'border-cafe-line text-cafe-muted'}`}>Per plate</button>
+            </div>
+            <p className="mb-3 text-xs text-cafe-muted">
+              {batchMode
+                ? 'Enter what one whole batch uses, and how many plates it makes. We work out the per-plate amount and deduct it on each sale.'
+                : 'Enter the amount used for one plate. Deducted from inventory on each sale.'}
+            </p>
 
             {inventory.length === 0 ? (
               <p className="text-xs text-yellow-400">Add items in Inventory first to build a recipe.</p>
             ) : (
               <div className="space-y-2">
-                {recipe.map((row, i) => (
-                  <div key={i} className="flex items-center gap-2">
-                    <select value={row.inventory_item_id} onChange={(e) => setIngredient(i, 'inventory_item_id', e.target.value)}
-                      className="min-w-0 flex-1 rounded-lg bg-cafe-card border border-cafe-line px-2 py-2 text-sm">
-                      {inventory.map((inv) => <option key={inv.id} value={inv.id}>{inv.name} ({inv.unit})</option>)}
-                    </select>
-                    <input type="number" min="0" step="any" placeholder="qty" value={row.qty}
-                      onChange={(e) => setIngredient(i, 'qty', e.target.value)}
-                      className="w-20 rounded-lg bg-cafe-card border border-cafe-line px-2 py-2 text-sm" />
-                    <button type="button" onClick={() => removeIngredient(i)} className="rounded-lg p-1.5 text-cafe-muted hover:text-red-400"><X size={16} /></button>
-                  </div>
-                ))}
+                {recipe.map((row, i) => {
+                  const iu = invMap[row.inventory_item_id]?.unit || ''
+                  return (
+                    <div key={i} className="flex items-center gap-2">
+                      <select value={row.inventory_item_id} onChange={(e) => setIngredient(i, 'inventory_item_id', e.target.value)}
+                        className="min-w-0 flex-1 rounded-lg bg-cafe-card border border-cafe-line px-2 py-2 text-sm">
+                        {inventory.map((inv) => <option key={inv.id} value={inv.id}>{inv.name} ({inv.unit})</option>)}
+                      </select>
+                      <input type="number" min="0" step="any" placeholder="qty" value={row.qty}
+                        onChange={(e) => setIngredient(i, 'qty', e.target.value)}
+                        className="w-16 rounded-lg bg-cafe-card border border-cafe-line px-2 py-2 text-sm" />
+                      {batchMode ? (
+                        <select value={row.unit || iu} onChange={(e) => setIngredient(i, 'unit', e.target.value)}
+                          className="w-16 rounded-lg bg-cafe-card border border-cafe-line px-1 py-2 text-sm">
+                          {unitsForFamily(iu).map((u) => <option key={u} value={u}>{u}</option>)}
+                        </select>
+                      ) : (
+                        <span className="w-10 text-xs text-cafe-muted">{iu}</span>
+                      )}
+                      <button type="button" onClick={() => removeIngredient(i)} className="rounded-lg p-1.5 text-cafe-muted hover:text-red-400"><X size={16} /></button>
+                    </div>
+                  )
+                })}
                 <button type="button" onClick={addIngredient}
                   className="flex items-center gap-1 text-sm font-semibold text-cafe-accent">
                   <Plus size={14} /> Add ingredient
@@ -245,12 +316,25 @@ export default function Menu() {
               </div>
             )}
 
+            {batchMode && recipe.length > 0 && (
+              <label className="mt-3 flex items-center gap-2 text-sm">
+                <span className="text-cafe-muted">This batch makes</span>
+                <input type="number" min="1" step="any" placeholder="e.g. 11" value={batchYield}
+                  onChange={(e) => setBatchYield(e.target.value)}
+                  className="w-20 rounded-lg bg-cafe-card border border-cafe-line px-2 py-1.5 text-sm" />
+                <span className="text-cafe-muted">plates</span>
+              </label>
+            )}
+
             {recipe.length > 0 && (
               <div className="mt-3 grid grid-cols-3 gap-2 border-t border-cafe-line pt-2 text-center text-xs">
-                <div><p className="text-cafe-muted">Cost</p><p className="font-bold">{rupees(cost)}</p></div>
+                <div><p className="text-cafe-muted">Cost / plate</p><p className="font-bold">{rupees(cost)}</p></div>
                 <div><p className="text-cafe-muted">Sell</p><p className="font-bold">{rupees(price)}</p></div>
                 <div><p className="text-cafe-muted">Profit</p><p className={`font-bold ${profit >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{rupees(profit)}</p></div>
               </div>
+            )}
+            {batchMode && recipe.length > 0 && !batchYield && (
+              <p className="mt-1 text-center text-[11px] text-yellow-400">Enter how many plates the batch makes to get the per-plate cost.</p>
             )}
           </div>
 

@@ -5,6 +5,34 @@ export function rupees(amount) {
   return '₹' + n.toLocaleString('en-IN', { maximumFractionDigits: 2 })
 }
 
+// ---------- Unit conversion (for batch recipes: enter grams, store in kg) ----------
+// family + how many base units (kg / L / pcs) one of this unit equals.
+const UNIT_FAMILY = {
+  mg: ['mass', 0.000001], g: ['mass', 0.001], gram: ['mass', 0.001], grams: ['mass', 0.001], gm: ['mass', 0.001], kg: ['mass', 1],
+  ml: ['vol', 0.001], l: ['vol', 1], ltr: ['vol', 1], litre: ['vol', 1], liter: ['vol', 1],
+  pcs: ['count', 1], pc: ['count', 1], piece: ['count', 1], pieces: ['count', 1], nos: ['count', 1],
+}
+function unitInfo(u) { return UNIT_FAMILY[String(u || '').trim().toLowerCase()] || null }
+
+// Convert qty from one unit to another. If units are unknown or not in the same
+// family, return the number unchanged (assume already in the target unit).
+export function convertQty(qty, from, to) {
+  const q = Number(qty) || 0
+  if (!from || !to || from === to) return q
+  const a = unitInfo(from), b = unitInfo(to)
+  if (a && b && a[0] === b[0]) return (q * a[1]) / b[1]
+  return q
+}
+
+// Units to offer in the batch entry dropdown for an item, item's own unit first.
+export function unitsForFamily(unit) {
+  const info = unitInfo(unit)
+  const fam = info?.[0]
+  const base = fam === 'mass' ? ['kg', 'g'] : fam === 'vol' ? ['L', 'ml'] : null
+  if (!base) return [unit]
+  return [unit, ...base.filter((b) => b.toLowerCase() !== String(unit).toLowerCase())]
+}
+
 export const CAFE = {
   name: 'Mocka Cafe',
   tagline: 'Stay where your heart belongs to',
