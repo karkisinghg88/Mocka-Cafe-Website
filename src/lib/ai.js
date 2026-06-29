@@ -12,7 +12,8 @@ export async function generateAiReport(data) {
   const summary = {
     period: data.periodLabel,
     sales: data.sales, cost_of_goods: data.cogs, gross_profit: data.grossProfit,
-    expenses: { rent: data.rent, electricity: data.electricity, cylinders: data.cylinderTotal, other: data.otherTotal, total: data.totalExpenses },
+    expenses: { rent: data.rent, electricity: data.electricity, cylinders: data.cylinderTotal, salaries: data.salaryTotal, other: data.otherTotal, total: data.totalExpenses },
+    plates_sold: data.plates, gas_cost_per_plate: data.gasPerPlate,
     net_profit: data.netProfit,
     cash_collected: data.cashTotal, upi_collected: data.upiTotal,
     orders: data.orderCount, average_order_value: Math.round(data.aov),
