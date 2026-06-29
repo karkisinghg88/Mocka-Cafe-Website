@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Plus, Minus, Search, CheckCircle2, Send, Wallet, QrCode, Banknote } from 'lucide-react'
+import { Plus, Minus, Search, CheckCircle2, Send, Wallet, QrCode, Banknote, Trash2, ArrowLeft, ClipboardList } from 'lucide-react'
 import { getMenu, getSettings, createOrder, addOrderItem, updateOrderItemQty, setOrderStatus, recalcOrderTotal, finalizeOrderInventory } from '../../lib/db'
 import { useOrders } from '../../hooks/useOrders'
 import { supabase } from '../../lib/supabase'
@@ -240,12 +240,13 @@ function PickRow({ item, cart, inc, dec }) {
   )
 }
 
-// ---- New order builder ----
+// ---- New order builder (build items, then review, then send) ----
 function NewOrderModal({ menu, onClose }) {
   const [cart, setCart] = useState({}) // key -> { item, variant, qty }
   const [customer, setCustomer] = useState('')
   const [table, setTable] = useState('')
   const [q, setQ] = useState('')
+  const [step, setStep] = useState('build') // 'build' | 'review'
   const [saving, setSaving] = useState(false)
 
   const filtered = useMemo(
@@ -254,8 +255,10 @@ function NewOrderModal({ menu, onClose }) {
   )
   const inc = (item, variant) => setCart((c) => { const k = keyOf(item, variant); return { ...c, [k]: { item, variant, qty: (c[k]?.qty || 0) + 1 } } })
   const dec = (item, variant) => setCart((c) => { const k = keyOf(item, variant); const n = (c[k]?.qty || 0) - 1; const x = { ...c }; if (n <= 0) delete x[k]; else x[k] = { ...x[k], qty: n }; return x })
+  const removeLine = (item, variant) => setCart((c) => { const x = { ...c }; delete x[keyOf(item, variant)]; return x })
 
   const lines = Object.values(cart)
+  const count = lines.reduce((s, l) => s + l.qty, 0)
   const total = lines.reduce((s, l) => s + priceOf(l.item, l.variant) * l.qty, 0)
 
   const submit = async () => {
@@ -277,29 +280,70 @@ function NewOrderModal({ menu, onClose }) {
   }
 
   return (
-    <Modal open onClose={onClose} title="New order">
-      <div className="space-y-3">
-        <div className="grid grid-cols-2 gap-2">
-          <Input placeholder="Customer name" value={customer} onChange={(e) => setCustomer(e.target.value)} />
-          <Input placeholder="Table no." value={table} onChange={(e) => setTable(e.target.value)} />
-        </div>
-        <div className="relative">
-          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-cafe-muted" />
-          <Input placeholder="Search menu…" className="pl-9" value={q} onChange={(e) => setQ(e.target.value)} />
-        </div>
+    <Modal open onClose={onClose} title={step === 'review' ? 'Review order' : 'New order'}>
+      {step === 'build' ? (
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-2">
+            <Input placeholder="Customer name" value={customer} onChange={(e) => setCustomer(e.target.value)} />
+            <Input placeholder="Table no." value={table} onChange={(e) => setTable(e.target.value)} />
+          </div>
+          <div className="relative">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-cafe-muted" />
+            <Input placeholder="Search menu…" className="pl-9" value={q} onChange={(e) => setQ(e.target.value)} />
+          </div>
 
-        <div className="max-h-56 space-y-1 overflow-y-auto">
-          {filtered.map((m) => <PickRow key={m.id} item={m} cart={cart} inc={inc} dec={dec} />)}
-        </div>
+          <div className="max-h-56 space-y-1 overflow-y-auto">
+            {filtered.map((m) => <PickRow key={m.id} item={m} cart={cart} inc={inc} dec={dec} />)}
+          </div>
 
-        <div className="flex items-center justify-between border-t border-cafe-line pt-3">
-          <span className="text-cafe-muted">Total</span>
-          <span className="text-lg font-bold text-cafe-accent">{rupees(total)}</span>
+          <div className="flex items-center justify-between border-t border-cafe-line pt-3">
+            <span className="text-cafe-muted">{count} item{count === 1 ? '' : 's'}</span>
+            <span className="text-lg font-bold text-cafe-accent">{rupees(total)}</span>
+          </div>
+          <Button onClick={() => setStep('review')} disabled={lines.length === 0} className="w-full">
+            <ClipboardList size={16} /> Review order{count ? ` · ${count} item${count === 1 ? '' : 's'}` : ''}
+          </Button>
         </div>
-        <Button onClick={submit} disabled={saving || lines.length === 0} className="w-full">
-          <Send size={16} /> {saving ? 'Sending…' : 'Send to kitchen'}
-        </Button>
-      </div>
+      ) : (
+        <div className="space-y-3">
+          <p className="text-xs text-cafe-muted">Check the order, change quantity or remove items, then send to the kitchen.</p>
+          {(customer || table) && (
+            <p className="text-sm font-semibold">{customer || 'Walk-in'}{table ? ` · Table ${table}` : ''}</p>
+          )}
+
+          {lines.length === 0 ? (
+            <p className="rounded-xl bg-cafe-bg px-3 py-4 text-center text-sm text-cafe-muted">No items left. Go back to add some.</p>
+          ) : (
+            <div className="space-y-1">
+              {lines.map((l) => (
+                <div key={keyOf(l.item, l.variant)} className="flex items-center gap-2 rounded-xl bg-cafe-bg px-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm leading-snug">{nameOf(l.item, l.variant)}</p>
+                    <p className="text-xs text-cafe-muted">{rupees(priceOf(l.item, l.variant) * l.qty)}</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => dec(l.item, l.variant)} className="rounded-lg bg-cafe-line p-1.5"><Minus size={14} /></button>
+                    <span className="w-5 text-center text-sm font-semibold">{l.qty}</span>
+                    <button onClick={() => inc(l.item, l.variant)} className="rounded-lg bg-cafe-accent p-1.5 text-black"><Plus size={14} /></button>
+                  </div>
+                  <button onClick={() => removeLine(l.item, l.variant)} className="rounded-lg p-1.5 text-cafe-muted hover:text-red-400" aria-label="Remove item"><Trash2 size={16} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="flex items-center justify-between border-t border-cafe-line pt-3">
+            <span className="text-cafe-muted">Total</span>
+            <span className="text-lg font-bold text-cafe-accent">{rupees(total)}</span>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Button variant="ghost" onClick={() => setStep('build')}><ArrowLeft size={16} /> Add more items</Button>
+            <Button variant="success" onClick={submit} disabled={saving || lines.length === 0}>
+              <Send size={16} /> {saving ? 'Sending…' : 'Send to kitchen'}
+            </Button>
+          </div>
+        </div>
+      )}
     </Modal>
   )
 }

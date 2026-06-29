@@ -47,3 +47,9 @@ input[type=number]::-webkit-outer-spin-button {
 input[type=number] { -moz-appearance: textfield; }
 
 .safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+
+/* Single-tap on controls: stop the browser waiting for a double-tap-to-zoom,
+   which otherwise makes buttons and fields feel like they need two taps. */
+button, a, input, select, textarea, label, [role="button"] {
+  touch-action: manipulation;
+}
