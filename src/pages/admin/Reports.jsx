@@ -9,7 +9,7 @@ import { supabase } from '../../lib/supabase'
 import {
   getShopkeepers, getSettings, getExpenses, addExpense, deleteExpense,
   getStaffSalaries, addStaffSalary, updateStaffSalary, deleteStaffSalary, getAllRecipes,
-  applyRecipeFix, emailMonthlyReport,
+  applyRecipeFix, emailMonthlyReport, getStaffByRole,
 } from '../../lib/db'
 import { generateAiReport } from '../../lib/ai'
 import { rupees, todayISO, cycleRange } from '../../lib/format'
@@ -42,9 +42,9 @@ export default function Reports() {
     const settings = await getSettings()
     const cycleDay = Number(settings.report_cycle_day || 1)
     const { start, end, label } = cycleRange(month, cycleDay)
-    const [{ data: orders }, { data: purchases }, { data: inventory }, { data: procured }, shopkeepers, expenses, staffSalaries, recipesMap] = await Promise.all([
+    const [{ data: orders }, { data: purchases }, { data: inventory }, { data: procured }, shopkeepers, expenses, staffSalaries, recipesMap, riders] = await Promise.all([
       supabase.from('orders')
-        .select('total, delivery_charge, type, business_date, created_at, payment_method, cash_amount, upi_amount, rating, order_items(menu_item_id, name_snapshot, price_snapshot, quantity, cost_snapshot, is_available)')
+        .select('total, delivery_charge, type, business_date, created_at, payment_method, cash_amount, upi_amount, rating, rider_id, left_cafe_at, reached_at, back_at_cafe_at, paid_at, order_items(menu_item_id, name_snapshot, price_snapshot, quantity, cost_snapshot, is_available)')
         .gte('business_date', start).lte('business_date', end)
         .or('payment_status.eq.received,status.eq.paid,status.eq.delivered'),
       supabase.from('inventory_purchases').select('item_id, qty, total_cost, purchased_on').gte('purchased_on', start).lte('purchased_on', end),
@@ -54,6 +54,7 @@ export default function Reports() {
       getExpenses(start, end),
       getStaffSalaries(),
       getAllRecipes(),
+      getStaffByRole('rider'),
     ])
     const impliedUse = {} // inventory_item_id -> qty the recipes say sales should have used
 
@@ -143,6 +144,24 @@ export default function Reports() {
     }).filter((r) => r.implied > 0 || r.purchased > 0)
       .sort((a, b) => b.valueImpact - a.valueImpact)
 
+    // ---- Rider delivery times (recorded by riders for each delivery) ----
+    const riderNameMap = Object.fromEntries((riders || []).map((r) => [r.id, r.full_name || 'Rider']))
+    const riderAgg = {}
+    ;(orders || []).forEach((o) => {
+      if (!o.rider_id) return
+      const a = (riderAgg[o.rider_id] ||= { name: riderNameMap[o.rider_id] || 'Rider', count: 0, reachSum: 0, reachN: 0, roundSum: 0, roundN: 0 })
+      a.count++
+      const reach = (o.left_cafe_at && o.reached_at) ? (new Date(o.reached_at) - new Date(o.left_cafe_at)) / 60000 : null
+      const round = (o.left_cafe_at && o.back_at_cafe_at) ? (new Date(o.back_at_cafe_at) - new Date(o.left_cafe_at)) / 60000 : null
+      if (reach != null && reach >= 0) { a.reachSum += reach; a.reachN++ }
+      if (round != null && round >= 0) { a.roundSum += round; a.roundN++ }
+    })
+    const deliveries = Object.values(riderAgg).map((a) => ({
+      name: a.name, count: a.count,
+      avgReach: a.reachN ? Math.round(a.reachSum / a.reachN) : null,
+      avgRound: a.roundN ? Math.round(a.roundSum / a.roundN) : null,
+    })).sort((x, y) => y.count - x.count)
+
     // ---- Expenses + net profit (rent/electricity logged per cycle, with dates) ----
     const ofType = (t) => (expenses || []).filter((e) => e.type === t)
     const sum = (list) => list.reduce((s, e) => s + Number(e.amount), 0)
@@ -173,7 +192,7 @@ export default function Reports() {
       avgFoodRating, lowRated, topRated, ratedCount: rated.length,
       rent, electricity, rentList, elecList, cylinderList, salaryList, otherList,
       cylinderTotal, salaryTotal, otherTotal, totalExpenses, netProfit,
-      staffSalaries, plates, gasPerPlate, cylinderCount, cylinderDaysEach, recipeCheck,
+      staffSalaries, plates, gasPerPlate, cylinderCount, cylinderDaysEach, recipeCheck, deliveries,
       procurement, bulkCandidates, dailyItems, shopSpend,
       sales, cogs, grossProfit, salesToday, orderCount,
       cashTotal, upiTotal,
@@ -341,6 +360,9 @@ export default function Reports() {
 
           {/* RECIPE CHECK / AUTO-CALIBRATION */}
           <RecipeCheckSection data={data} onReload={run} />
+
+          {/* RIDER DELIVERY TIMES */}
+          <DeliveriesSection data={data} />
 
           {/* SUGGESTIONS */}
           <SuggestionsSection data={data} />
@@ -561,6 +583,9 @@ function downloadReport(data, month) {
   L.push('')
   L.push('Item bought,Times,Spent')
   data.procurement.forEach((p) => L.push(`${p.name},${p.times},${p.spend}`))
+  L.push('')
+  L.push('Rider,Deliveries,Avg mins to reach,Avg mins round trip')
+  ;(data.deliveries || []).forEach((r) => L.push(`${r.name},${r.count},${r.avgReach ?? ''},${r.avgRound ?? ''}`))
   const blob = new Blob([L.join('\n')], { type: 'text/csv' })
   const a = document.createElement('a')
   a.href = URL.createObjectURL(blob)
@@ -676,6 +701,46 @@ function ProcurementSection({ data }) {
                   ))}
                 </div>
               )}
+            </>
+          )}
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function DeliveriesSection({ data }) {
+  const [open, setOpen] = useState(false)
+  const rows = data.deliveries || []
+  const totalDeliveries = rows.reduce((s, r) => s + r.count, 0)
+  return (
+    <Card className="overflow-hidden">
+      <button onClick={() => setOpen((o) => !o)} className="flex w-full items-center justify-between p-4 text-left">
+        <span className="flex items-center gap-2"><Bike size={18} className="text-cafe-accent" /><span className="font-bold">Delivery times</span>
+          {totalDeliveries > 0 && <Badge className="bg-cafe-accent/15 text-cafe-accent">{totalDeliveries}</Badge>}</span>
+        <ChevronDown size={18} className={`text-cafe-muted transition ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="space-y-2 border-t border-cafe-line p-4 text-sm">
+          <p className="text-xs text-cafe-muted">For each rider this cycle: deliveries done, average time from leaving the cafe to reaching the customer, and the average full round trip back to the cafe.</p>
+          {rows.length === 0 ? (
+            <p className="text-cafe-muted">No rider deliveries recorded this cycle yet.</p>
+          ) : (
+            <>
+              <div className="flex items-center gap-2 border-b border-cafe-line pb-1 text-[11px] uppercase text-cafe-muted">
+                <span className="flex-1">Rider</span>
+                <span className="w-16 text-right">Done</span>
+                <span className="w-20 text-right">To reach</span>
+                <span className="w-20 text-right">Round trip</span>
+              </div>
+              {rows.map((r) => (
+                <div key={r.name} className="flex items-center gap-2 py-1">
+                  <span className="min-w-0 flex-1 truncate">{r.name}</span>
+                  <span className="w-16 text-right text-cafe-muted">{r.count}</span>
+                  <span className="w-20 text-right">{r.avgReach != null ? `${r.avgReach} min` : '—'}</span>
+                  <span className="w-20 text-right">{r.avgRound != null ? `${r.avgRound} min` : '—'}</span>
+                </div>
+              ))}
             </>
           )}
         </div>

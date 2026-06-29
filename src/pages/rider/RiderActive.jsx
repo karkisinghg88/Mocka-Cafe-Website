@@ -1,9 +1,9 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Phone, Navigation, MapPin, CheckCircle2, Banknote, QrCode, PackageCheck } from 'lucide-react'
+import { Phone, Navigation, MapPin, CheckCircle2, Banknote, QrCode, PackageCheck, Bike, Home } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { useAuth } from '../../context/AuthContext'
 import { setOrderStatus, finalizeOrderInventory } from '../../lib/db'
-import { rupees, STATUS_LABELS, STATUS_COLORS } from '../../lib/format'
+import { rupees, clockTime, minutesBetween, STATUS_LABELS, STATUS_COLORS } from '../../lib/format'
 import { Button, Card, Spinner, EmptyState, Badge } from '../../components/ui'
 
 function mapsUrl(o) {
@@ -19,9 +19,11 @@ export default function RiderActive() {
   const load = useCallback(async () => {
     const { data } = await supabase.from('orders')
       .select('*, order_items(*)')
-      .eq('rider_id', user.id).in('status', ['out_for_delivery', 'reached'])
+      .eq('rider_id', user.id).in('status', ['out_for_delivery', 'reached', 'delivered'])
       .order('created_at')
-    setOrders(data || []); setLoading(false)
+    // Keep delivered orders only until the rider taps "Back at cafe".
+    setOrders((data || []).filter((o) => o.status !== 'delivered' || !o.back_at_cafe_at))
+    setLoading(false)
   }, [user.id])
 
   useEffect(() => {
@@ -45,8 +47,11 @@ export default function RiderActive() {
 function DeliveryCard({ order }) {
   const [pay, setPay] = useState('cash')
   const [busy, setBusy] = useState(false)
+  const now = () => new Date().toISOString()
 
-  const reached = () => setOrderStatus(order.id, 'reached')
+  const startTrip = () => setOrderStatus(order.id, 'out_for_delivery', { left_cafe_at: now() })
+  const reached = () => setOrderStatus(order.id, 'reached', { reached_at: now() })
+  const backAtCafe = () => setOrderStatus(order.id, 'delivered', { back_at_cafe_at: now() })
   const deliver = async () => {
     setBusy(true)
     try {
@@ -54,11 +59,16 @@ function DeliveryCard({ order }) {
         payment_status: 'received', payment_method: pay,
         cash_amount: pay === 'cash' ? Number(order.total) : 0,
         upi_amount: pay === 'upi' ? Number(order.total) : 0,
-        paid_at: new Date().toISOString(),
+        paid_at: now(),
       })
       await finalizeOrderInventory(order.id)
     } finally { setBusy(false) }
   }
+
+  // Which step is the rider on?
+  const started = !!order.left_cafe_at
+  const atCustomer = order.status === 'reached' || !!order.reached_at
+  const delivered = order.status === 'delivered'
 
   return (
     <Card className="p-4">
@@ -88,9 +98,23 @@ function DeliveryCard({ order }) {
         </a>
       </div>
 
-      {order.status === 'out_for_delivery' ? (
-        <Button variant="ghost" className="mt-2 w-full" onClick={reached}><CheckCircle2 size={16} /> Mark reached</Button>
-      ) : (
+      {/* recorded times */}
+      {(order.left_cafe_at || order.reached_at || order.back_at_cafe_at) && (
+        <div className="mt-3 space-y-0.5 rounded-xl bg-cafe-bg p-2 text-xs text-cafe-muted">
+          {order.left_cafe_at && <p>Left cafe: {clockTime(order.left_cafe_at)}</p>}
+          {order.reached_at && <p>Reached: {clockTime(order.reached_at)}{minutesBetween(order.left_cafe_at, order.reached_at) != null ? ` (${minutesBetween(order.left_cafe_at, order.reached_at)} min)` : ''}</p>}
+          {order.paid_at && <p>Delivered: {clockTime(order.paid_at)}</p>}
+          {order.back_at_cafe_at && <p>Back at cafe: {clockTime(order.back_at_cafe_at)}</p>}
+        </div>
+      )}
+
+      {!started && (
+        <Button className="mt-3 w-full" onClick={startTrip}><Bike size={16} /> Start delivery (leaving cafe)</Button>
+      )}
+      {started && !atCustomer && (
+        <Button variant="ghost" className="mt-3 w-full" onClick={reached}><CheckCircle2 size={16} /> Reached customer</Button>
+      )}
+      {atCustomer && !delivered && (
         <div className="mt-3 space-y-2">
           <p className="text-center text-xs text-cafe-muted">Payment received by:</p>
           <div className="grid grid-cols-2 gap-2">
@@ -101,6 +125,9 @@ function DeliveryCard({ order }) {
             <PackageCheck size={16} /> {busy ? 'Saving…' : `Delivered · ${rupees(order.total)} (${pay === 'upi' ? 'UPI' : 'Cash'})`}
           </Button>
         </div>
+      )}
+      {delivered && !order.back_at_cafe_at && (
+        <Button className="mt-3 w-full" onClick={backAtCafe}><Home size={16} /> Back at cafe</Button>
       )}
     </Card>
   )

@@ -3,7 +3,7 @@ import { Check, X, Send, Bike, Phone } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { useOrders } from '../../hooks/useOrders'
 import { setOrderStatus, setItemAvailability, recalcOrderTotal, getSettings, getStaffByRole } from '../../lib/db'
-import { rupees, STATUS_LABELS, STATUS_COLORS } from '../../lib/format'
+import { rupees, clockTime, minutesBetween, STATUS_LABELS, STATUS_COLORS } from '../../lib/format'
 import { Button, Card, Spinner, EmptyState, Badge } from '../../components/ui'
 import BillRow from '../../components/BillRow'
 
@@ -40,7 +40,12 @@ export default function Delivery() {
           <p className="mb-2 text-sm font-semibold text-cafe-muted">Done today ({closed.length})</p>
           <p className="mb-2 text-xs text-cafe-muted">Tap a bill to see its items.</p>
           <div className="space-y-2">
-            {closed.map((o) => <BillRow key={o.id} order={o} showStatus />)}
+            {closed.map((o) => (
+              <div key={o.id}>
+                <BillRow order={o} showStatus />
+                <RiderTimes order={o} />
+              </div>
+            ))}
           </div>
         </div>
       )}
@@ -154,6 +159,24 @@ function DeliveryCard({ order, defaultCharge, riders, riderName }) {
           <Phone size={15} /> Call customer
         </a>
       </div>
+
+      <RiderTimes order={order} />
     </Card>
+  )
+}
+
+// Compact rider delivery times, shown to the admin once the rider records them.
+function RiderTimes({ order }) {
+  if (!order.left_cafe_at && !order.reached_at && !order.back_at_cafe_at) return null
+  const toReach = minutesBetween(order.left_cafe_at, order.reached_at)
+  const round = minutesBetween(order.left_cafe_at, order.back_at_cafe_at)
+  return (
+    <div className="mt-2 rounded-lg bg-cafe-bg p-2 text-[11px] text-cafe-muted">
+      <span className="font-semibold">Rider times: </span>
+      {order.left_cafe_at && <>left {clockTime(order.left_cafe_at)}</>}
+      {order.reached_at && <> · reached {clockTime(order.reached_at)}{toReach != null ? ` (${toReach}m)` : ''}</>}
+      {order.paid_at && <> · delivered {clockTime(order.paid_at)}</>}
+      {order.back_at_cafe_at && <> · back {clockTime(order.back_at_cafe_at)}{round != null ? ` (round ${round}m)` : ''}</>}
+    </div>
   )
 }
