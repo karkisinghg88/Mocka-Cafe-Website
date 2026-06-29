@@ -3,12 +3,13 @@ import {
   TrendingUp, TrendingDown, Flame, Coins, Snail, AlertTriangle,
   PackageX, ChevronDown, Lightbulb, Clock, ShoppingBasket, Trash2, Heart, ArrowUpNarrowWide, ShoppingCart,
   Banknote, QrCode, Download, Plus, Flame as Fuel, Receipt, Star, Sparkles,
-  Users, Pencil, Check,
+  Users, Pencil, Check, Mail, Wand2,
 } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import {
   getShopkeepers, getSettings, getExpenses, addExpense, deleteExpense,
   getStaffSalaries, addStaffSalary, updateStaffSalary, deleteStaffSalary, getAllRecipes,
+  applyRecipeFix, emailMonthlyReport,
 } from '../../lib/db'
 import { generateAiReport } from '../../lib/ai'
 import { rupees, todayISO, cycleRange } from '../../lib/format'
@@ -23,6 +24,13 @@ export default function Reports() {
   const [data, setData] = useState(null)
   const [restock, setRestock] = useState(null)
   const [ai, setAi] = useState({ text: '', loading: false, error: '' })
+  const [email, setEmail] = useState({ loading: false, msg: '', error: '' })
+
+  const sendEmail = async () => {
+    setEmail({ loading: true, msg: '', error: '' })
+    try { const r = await emailMonthlyReport(month); setEmail({ loading: false, msg: `Sent to ${r?.emailed || 'owner'}.`, error: '' }) }
+    catch (e) { setEmail({ loading: false, msg: '', error: e.message }) }
+  }
 
   const runAi = async () => {
     setAi({ text: '', loading: true, error: '' })
@@ -229,6 +237,17 @@ export default function Reports() {
             {!ai.text && !ai.error && <p className="mt-2 text-xs text-cafe-muted">Get an AI written summary and suggestions for this cycle. Add your Gemini key in Settings first.</p>}
           </Card>
 
+          {/* Email report */}
+          <Card className="p-4">
+            <div className="flex items-center justify-between gap-2">
+              <p className="flex items-center gap-2 font-semibold"><Mail size={16} className="text-cafe-accent" /> Email this report</p>
+              <Button className="px-3 py-2" disabled={email.loading} onClick={sendEmail}>{email.loading ? 'Sending…' : 'Email to owner'}</Button>
+            </div>
+            {email.error && <p className="mt-2 text-sm text-red-400">{email.error}</p>}
+            {email.msg && <p className="mt-2 text-sm text-emerald-400">{email.msg}</p>}
+            {!email.msg && !email.error && <p className="mt-2 text-xs text-cafe-muted">Sends the AI summary and month numbers to the owner. This also runs automatically every month.</p>}
+          </Card>
+
           <div className="grid grid-cols-2 gap-3">
             <Card className="p-4">
               <p className="text-xs text-cafe-muted">Sales today</p>
@@ -321,7 +340,7 @@ export default function Reports() {
           <ProcurementSection data={data} />
 
           {/* RECIPE CHECK / AUTO-CALIBRATION */}
-          <RecipeCheckSection data={data} />
+          <RecipeCheckSection data={data} onReload={run} />
 
           {/* SUGGESTIONS */}
           <SuggestionsSection data={data} />
@@ -665,12 +684,30 @@ function ProcurementSection({ data }) {
   )
 }
 
-function RecipeCheckSection({ data }) {
+function RecipeCheckSection({ data, onReload }) {
   const [open, setOpen] = useState(false)
+  const [fixing, setFixing] = useState(false)
   const rows = data.recipeCheck || []
   const flagged = rows.filter((r) => r.hint !== 'aligned')
   const fmt = (n) => Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })
   const hintColor = (h) => h === 'aligned' ? 'text-emerald-400' : h === 'no recipe uses this yet' ? 'text-yellow-400' : 'text-orange-400'
+
+  // Items we can auto-fix: a recipe exists (implied > 0) and usage is meaningfully
+  // off. Scale by the actual/used ratio, clamped so sparse data can't swing wildly.
+  const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n))
+  const fixable = rows
+    .filter((r) => r.ratio != null && (r.ratio >= 1.15 || r.ratio <= 0.85))
+    .map((r) => ({ ...r, factor: clamp(r.ratio, 0.5, 2) }))
+
+  const applyFixes = async () => {
+    if (!confirm(`Adjust ${fixable.length} ingredient${fixable.length === 1 ? '' : 's'} so your recipes match what you actually used? You can re-edit any recipe in Menu afterwards.`)) return
+    setFixing(true)
+    try {
+      for (const r of fixable) await applyRecipeFix(r.id, r.factor)
+      await onReload()
+      alert('Recipes updated to match real usage.')
+    } catch (e) { alert(e.message) } finally { setFixing(false) }
+  }
 
   return (
     <Card className="overflow-hidden">
@@ -704,8 +741,16 @@ function RecipeCheckSection({ data }) {
                   <span className={`w-24 text-right text-[11px] ${hintColor(r.hint)}`}>{r.hint}</span>
                 </div>
               ))}
+              {fixable.length > 0 && (
+                <div className="border-t border-cafe-line pt-3">
+                  <Button className="w-full" disabled={fixing} onClick={applyFixes}>
+                    <Wand2 size={15} /> {fixing ? 'Applying…' : `Apply AI fixes to ${fixable.length} ingredient${fixable.length === 1 ? '' : 's'}`}
+                  </Button>
+                  <p className="mt-1 text-center text-[11px] text-cafe-muted">Scales those recipes to match what you actually used. Good for starting; after a month it stays aligned on its own.</p>
+                </div>
+              )}
               <p className="border-t border-cafe-line pt-2 text-xs text-cafe-muted">
-                Tip: open the AI report above for a plain-language summary and suggested recipe fixes.
+                Tip: open the AI report above for a plain-language summary and the recipe fixes in words.
               </p>
             </>
           )}

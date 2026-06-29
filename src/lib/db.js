@@ -165,6 +165,22 @@ export async function getAllRecipes() {
   return map
 }
 
+// One-tap recipe fix: scale every recipe's use of an inventory item by factor,
+// so the recipes line up with what was actually bought/used (admin only RPC).
+export async function applyRecipeFix(inventoryItemId, factor) {
+  const { error } = await supabase.rpc('scale_recipe_ingredient', { p_item: inventoryItemId, p_factor: factor })
+  if (error) throw error
+}
+
+// Build + email the monthly report (Gemini summary + numbers) via the
+// monthly-report Edge Function. Pass the month being viewed (YYYY-MM).
+export async function emailMonthlyReport(month) {
+  const { data, error } = await supabase.functions.invoke('monthly-report', { body: { month } })
+  if (error) throw error
+  if (data && data.ok === false) throw new Error(data.error || 'Could not send the email.')
+  return data
+}
+
 // ---------- Stock counts (quick physical count -> corrects current_qty) ----------
 export async function saveStockCount(rows) {
   // rows: [{ item_id, qty }]
