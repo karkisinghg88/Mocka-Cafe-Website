@@ -8,7 +8,7 @@ import {
 import { supabase } from '../../lib/supabase'
 import {
   getShopkeepers, getSettings, getExpenses, addExpense, deleteExpense,
-  getStaffSalaries, addStaffSalary, updateStaffSalary, deleteStaffSalary,
+  getStaffSalaries, addStaffSalary, updateStaffSalary, deleteStaffSalary, getAllRecipes,
 } from '../../lib/db'
 import { generateAiReport } from '../../lib/ai'
 import { rupees, todayISO, cycleRange } from '../../lib/format'
@@ -34,9 +34,9 @@ export default function Reports() {
     const settings = await getSettings()
     const cycleDay = Number(settings.report_cycle_day || 1)
     const { start, end, label } = cycleRange(month, cycleDay)
-    const [{ data: orders }, { data: purchases }, { data: inventory }, { data: procured }, shopkeepers, expenses, staffSalaries] = await Promise.all([
+    const [{ data: orders }, { data: purchases }, { data: inventory }, { data: procured }, shopkeepers, expenses, staffSalaries, recipesMap] = await Promise.all([
       supabase.from('orders')
-        .select('total, delivery_charge, type, business_date, created_at, payment_method, cash_amount, upi_amount, rating, order_items(name_snapshot, price_snapshot, quantity, cost_snapshot, is_available)')
+        .select('total, delivery_charge, type, business_date, created_at, payment_method, cash_amount, upi_amount, rating, order_items(menu_item_id, name_snapshot, price_snapshot, quantity, cost_snapshot, is_available)')
         .gte('business_date', start).lte('business_date', end)
         .or('payment_status.eq.received,status.eq.paid,status.eq.delivered'),
       supabase.from('inventory_purchases').select('item_id, qty, total_cost, purchased_on').gte('purchased_on', start).lte('purchased_on', end),
@@ -45,7 +45,9 @@ export default function Reports() {
       getShopkeepers(),
       getExpenses(start, end),
       getStaffSalaries(),
+      getAllRecipes(),
     ])
+    const impliedUse = {} // inventory_item_id -> qty the recipes say sales should have used
 
     const today = todayISO()
     let sales = 0, cogs = 0, salesToday = 0, cashTotal = 0, upiTotal = 0, plates = 0
@@ -70,6 +72,9 @@ export default function Reports() {
         const p = (byProduct[it.name_snapshot] ||= { units: 0, revenue: 0, cost: 0, ratingSum: 0, ratingCount: 0 })
         p.units += it.quantity; p.revenue += rev; p.cost += cost
         if (o.rating) { p.ratingSum += Number(o.rating); p.ratingCount += 1 }
+        // What the recipes say this sale should have consumed (for the recipe check).
+        const rec = recipesMap[it.menu_item_id]
+        if (rec) rec.forEach((ri) => { impliedUse[ri.inventory_item_id] = (impliedUse[ri.inventory_item_id] || 0) + Number(ri.qty) * it.quantity })
       })
     })
 
@@ -109,6 +114,27 @@ export default function Reports() {
     })
     const shopSpend = Object.entries(byShopSpend).map(([name, spend]) => ({ name, spend })).sort((a, b) => b.spend - a.spend)
 
+    // ---- Recipe check / auto-calibration: recipe-implied usage vs real purchases ----
+    const checkIds = new Set([...Object.keys(impliedUse), ...Object.keys(buys)])
+    const recipeCheck = [...checkIds].map((id) => {
+      const inv = invMap[id]
+      const implied = impliedUse[id] || 0
+      const purchased = buys[id]?.qty || 0
+      const unitCost = Number(inv?.unit_cost || 0)
+      const variance = purchased - implied
+      const ratio = implied > 0 ? purchased / implied : null
+      let hint
+      if (implied === 0 && purchased > 0) hint = 'no recipe uses this yet'
+      else if (ratio != null && ratio >= 1.3) hint = 'using more than recipes say'
+      else if (ratio != null && ratio <= 0.7) hint = 'bought more than used'
+      else hint = 'aligned'
+      return {
+        id, name: inv?.name || buys[id]?.name || 'Item', unit: inv?.unit || buys[id]?.unit || '',
+        implied, purchased, variance, ratio, hint, valueImpact: Math.abs(variance) * unitCost,
+      }
+    }).filter((r) => r.implied > 0 || r.purchased > 0)
+      .sort((a, b) => b.valueImpact - a.valueImpact)
+
     // ---- Expenses + net profit (rent/electricity logged per cycle, with dates) ----
     const ofType = (t) => (expenses || []).filter((e) => e.type === t)
     const sum = (list) => list.reduce((s, e) => s + Number(e.amount), 0)
@@ -139,7 +165,7 @@ export default function Reports() {
       avgFoodRating, lowRated, topRated, ratedCount: rated.length,
       rent, electricity, rentList, elecList, cylinderList, salaryList, otherList,
       cylinderTotal, salaryTotal, otherTotal, totalExpenses, netProfit,
-      staffSalaries, plates, gasPerPlate, cylinderCount, cylinderDaysEach,
+      staffSalaries, plates, gasPerPlate, cylinderCount, cylinderDaysEach, recipeCheck,
       procurement, bulkCandidates, dailyItems, shopSpend,
       sales, cogs, grossProfit, salesToday, orderCount,
       cashTotal, upiTotal,
@@ -293,6 +319,9 @@ export default function Reports() {
 
           {/* PROCUREMENT */}
           <ProcurementSection data={data} />
+
+          {/* RECIPE CHECK / AUTO-CALIBRATION */}
+          <RecipeCheckSection data={data} />
 
           {/* SUGGESTIONS */}
           <SuggestionsSection data={data} />
@@ -628,6 +657,56 @@ function ProcurementSection({ data }) {
                   ))}
                 </div>
               )}
+            </>
+          )}
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function RecipeCheckSection({ data }) {
+  const [open, setOpen] = useState(false)
+  const rows = data.recipeCheck || []
+  const flagged = rows.filter((r) => r.hint !== 'aligned')
+  const fmt = (n) => Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })
+  const hintColor = (h) => h === 'aligned' ? 'text-emerald-400' : h === 'no recipe uses this yet' ? 'text-yellow-400' : 'text-orange-400'
+
+  return (
+    <Card className="overflow-hidden">
+      <button onClick={() => setOpen((o) => !o)} className="flex w-full items-center justify-between p-4 text-left">
+        <span className="flex items-center gap-2"><FlaskConical size={18} className="text-cafe-accent" /><span className="font-bold">Recipe check (auto-calibration)</span>
+          {flagged.length > 0 && <Badge className="bg-orange-500/15 text-orange-400">{flagged.length}</Badge>}</span>
+        <ChevronDown size={18} className={`text-cafe-muted transition ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="space-y-3 border-t border-cafe-line p-4 text-sm">
+          <p className="text-xs text-cafe-muted">
+            Compares what your recipes say you used (from sales) against what you actually bought this cycle.
+            Big gaps mean a recipe is off, or there is waste / free food. It gets sharper over about a month, and is most
+            accurate if you do a stock count now and then.
+          </p>
+          {rows.length === 0 ? (
+            <p className="text-cafe-muted">Not enough data yet. Add recipes to your dishes and record some sales and purchases.</p>
+          ) : (
+            <>
+              <div className="flex items-center gap-2 border-b border-cafe-line pb-1 text-[11px] uppercase text-cafe-muted">
+                <span className="flex-1">Raw item</span>
+                <span className="w-16 text-right">Used</span>
+                <span className="w-16 text-right">Bought</span>
+                <span className="w-24 text-right">Note</span>
+              </div>
+              {rows.slice(0, 20).map((r) => (
+                <div key={r.id} className="flex items-center gap-2 py-1">
+                  <span className="min-w-0 flex-1 truncate">{r.name}</span>
+                  <span className="w-16 text-right text-cafe-muted">{fmt(r.implied)} {r.unit}</span>
+                  <span className="w-16 text-right">{fmt(r.purchased)} {r.unit}</span>
+                  <span className={`w-24 text-right text-[11px] ${hintColor(r.hint)}`}>{r.hint}</span>
+                </div>
+              ))}
+              <p className="border-t border-cafe-line pt-2 text-xs text-cafe-muted">
+                Tip: open the AI report above for a plain-language summary and suggested recipe fixes.
+              </p>
             </>
           )}
         </div>
