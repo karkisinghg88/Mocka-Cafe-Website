@@ -3,7 +3,7 @@ import {
   TrendingUp, TrendingDown, Flame, Coins, Snail, AlertTriangle,
   PackageX, ChevronDown, Lightbulb, Clock, ShoppingBasket, Trash2, Heart, ArrowUpNarrowWide, ShoppingCart,
   Banknote, QrCode, Download, Plus, Flame as Fuel, Receipt, Star, Sparkles,
-  Users, Pencil, Check, Mail, Wand2,
+  Users, Pencil, Check, Mail, Wand2, FlaskConical, Bike,
 } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import {
