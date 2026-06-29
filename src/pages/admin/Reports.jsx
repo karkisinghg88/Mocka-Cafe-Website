@@ -3,9 +3,13 @@ import {
   TrendingUp, TrendingDown, Flame, Coins, Snail, AlertTriangle,
   PackageX, ChevronDown, Lightbulb, Clock, ShoppingBasket, Trash2, Heart, ArrowUpNarrowWide, ShoppingCart,
   Banknote, QrCode, Download, Plus, Flame as Fuel, Receipt, Star, Sparkles,
+  Users, Pencil, Check,
 } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
-import { getShopkeepers, getSettings, getExpenses, addExpense, deleteExpense } from '../../lib/db'
+import {
+  getShopkeepers, getSettings, getExpenses, addExpense, deleteExpense,
+  getStaffSalaries, addStaffSalary, updateStaffSalary, deleteStaffSalary,
+} from '../../lib/db'
 import { generateAiReport } from '../../lib/ai'
 import { rupees, todayISO, cycleRange } from '../../lib/format'
 import { Card, Spinner, Badge, Button } from '../../components/ui'
@@ -30,7 +34,7 @@ export default function Reports() {
     const settings = await getSettings()
     const cycleDay = Number(settings.report_cycle_day || 1)
     const { start, end, label } = cycleRange(month, cycleDay)
-    const [{ data: orders }, { data: purchases }, { data: inventory }, { data: procured }, shopkeepers, expenses] = await Promise.all([
+    const [{ data: orders }, { data: purchases }, { data: inventory }, { data: procured }, shopkeepers, expenses, staffSalaries] = await Promise.all([
       supabase.from('orders')
         .select('total, delivery_charge, type, business_date, created_at, payment_method, cash_amount, upi_amount, rating, order_items(name_snapshot, price_snapshot, quantity, cost_snapshot, is_available)')
         .gte('business_date', start).lte('business_date', end)
@@ -40,10 +44,11 @@ export default function Reports() {
       supabase.from('purchase_items').select('shopkeeper_id, qty, unit_price, payment_method').eq('status', 'purchased').gte('business_date', start).lte('business_date', end),
       getShopkeepers(),
       getExpenses(start, end),
+      getStaffSalaries(),
     ])
 
     const today = todayISO()
-    let sales = 0, cogs = 0, salesToday = 0, cashTotal = 0, upiTotal = 0
+    let sales = 0, cogs = 0, salesToday = 0, cashTotal = 0, upiTotal = 0, plates = 0
     const byProduct = {}
     const hours = Array(24).fill(0)
 
@@ -58,6 +63,7 @@ export default function Reports() {
       cashTotal += c; upiTotal += u
       ;(o.order_items || []).forEach((it) => {
         if (it.is_available === false) return
+        plates += Number(it.quantity) || 0
         const rev = Number(it.price_snapshot) * it.quantity
         const cost = Number(it.cost_snapshot) * it.quantity
         cogs += cost
@@ -106,17 +112,34 @@ export default function Reports() {
     // ---- Expenses + net profit (rent/electricity logged per cycle, with dates) ----
     const ofType = (t) => (expenses || []).filter((e) => e.type === t)
     const sum = (list) => list.reduce((s, e) => s + Number(e.amount), 0)
-    const rentList = ofType('rent'), elecList = ofType('electricity'), cylinderList = ofType('cylinder'), otherList = ofType('other')
-    const rent = sum(rentList), electricity = sum(elecList), cylinderTotal = sum(cylinderList), otherTotal = sum(otherList)
+    const rentList = ofType('rent'), elecList = ofType('electricity'), cylinderList = ofType('cylinder')
+    const salaryList = ofType('salary'), otherList = ofType('other')
+    const rent = sum(rentList), electricity = sum(elecList), cylinderTotal = sum(cylinderList)
+    const salaryTotal = sum(salaryList), otherTotal = sum(otherList)
     const grossProfit = sales - cogs
-    const totalExpenses = rent + electricity + cylinderTotal + otherTotal
+    const totalExpenses = rent + electricity + cylinderTotal + salaryTotal + otherTotal
     const netProfit = grossProfit - totalExpenses
+
+    // Gas/cylinder costing: spread cylinder spend over plates sold this cycle.
+    // Cylinders stay counted once (as an expense); this is a per-plate insight
+    // that gets more accurate as more cylinders are logged.
+    const cylinderCount = cylinderList.reduce((s, e) => s + (Number(e.qty) || 1), 0)
+    const gasPerPlate = plates > 0 ? cylinderTotal / plates : 0
+    const cylDates = cylinderList.map((e) => e.expense_date).sort()
+    let cylinderDaysEach = 0
+    if (cylDates.length >= 2) {
+      const gaps = []
+      for (let i = 1; i < cylDates.length; i++) gaps.push((new Date(cylDates[i]) - new Date(cylDates[i - 1])) / 86400000)
+      cylinderDaysEach = Math.round(gaps.reduce((a, b) => a + b, 0) / gaps.length)
+    }
 
     const costed = products.filter((p) => !p.noRecipe)
     setData({
       periodLabel: label, start, end,
       avgFoodRating, lowRated, topRated, ratedCount: rated.length,
-      rent, electricity, rentList, elecList, cylinderList, otherList, cylinderTotal, otherTotal, totalExpenses, netProfit,
+      rent, electricity, rentList, elecList, cylinderList, salaryList, otherList,
+      cylinderTotal, salaryTotal, otherTotal, totalExpenses, netProfit,
+      staffSalaries, plates, gasPerPlate, cylinderCount, cylinderDaysEach,
       procurement, bulkCandidates, dailyItems, shopSpend,
       sales, cogs, grossProfit, salesToday, orderCount,
       cashTotal, upiTotal,
@@ -156,10 +179,16 @@ export default function Reports() {
             <div className="mt-3 space-y-1 border-t border-cafe-line pt-3 text-sm">
               <Line label="Sales" value={rupees(data.sales)} />
               <Line label="Less cost of goods" value={rupees(data.cogs)} red />
-              <Line label="Less expenses (rent, bills, gas)" value={rupees(data.totalExpenses)} red />
+              <Line label="Less expenses (rent, bills, gas, salaries)" value={rupees(data.totalExpenses)} red />
               <div className="flex justify-between border-t border-cafe-line pt-1 font-bold">
                 <span>Net</span><span className={data.netProfit >= 0 ? 'text-emerald-400' : 'text-red-400'}>{rupees(data.netProfit)}</span>
               </div>
+              {data.gasPerPlate > 0 && (
+                <p className="pt-1 text-[11px] text-cafe-muted">
+                  Gas: {data.cylinderCount} cylinder{data.cylinderCount === 1 ? '' : 's'} this cycle, about {rupees(data.gasPerPlate)} per plate
+                  {data.cylinderDaysEach > 0 && `, one cylinder lasts roughly ${data.cylinderDaysEach} days`}.
+                </p>
+              )}
             </div>
           </Card>
 
@@ -199,6 +228,9 @@ export default function Reports() {
 
           {/* EXPENSES */}
           <ExpensesSection data={data} onReload={run} />
+
+          {/* SALARIES & LABOUR */}
+          <SalariesSection data={data} onReload={run} />
 
           {/* LOW IN STOCK */}
           <LowStockSection items={data.lowStock} onRestock={setRestock} />
@@ -303,6 +335,8 @@ function ExpensesSection({ data, onReload }) {
             onReload={onReload} onRemove={remove} dDate={dDate} />
           <ExpenseGroup title="Gas cylinders" type="cylinder" list={data.cylinderList} start={data.start} withQty
             onReload={onReload} onRemove={remove} dDate={dDate} />
+          <ExpenseGroup title="Salaries & labour" type="salary" list={data.salaryList} start={data.start} withLabel
+            onReload={onReload} onRemove={remove} dDate={dDate} />
           <ExpenseGroup title="Other expenses" type="other" list={data.otherList} start={data.start} withLabel
             onReload={onReload} onRemove={remove} dDate={dDate} />
 
@@ -343,6 +377,118 @@ function ExpenseGroup({ title, type, list, start, withQty, withLabel, onReload, 
   )
 }
 
+function SalariesSection({ data, onReload }) {
+  const [open, setOpen] = useState(false)
+  const [add, setAdd] = useState({ name: '', role: 'chef', monthly_amount: '' })
+  const [editId, setEditId] = useState(null)
+  const [editAmt, setEditAmt] = useState('')
+  const [helper, setHelper] = useState({ name: '', amount: '', date: data.start })
+  const setA = (k) => (e) => setAdd((x) => ({ ...x, [k]: e.target.value }))
+  const setH = (k) => (e) => setHelper((x) => ({ ...x, [k]: e.target.value }))
+
+  // Has this staff member's monthly salary already been posted this cycle?
+  const paidThisCycle = (name) => (data.salaryList || []).some((e) => e.label === name && e.note === 'monthly')
+
+  const addStaff = async () => {
+    if (!add.name.trim()) return
+    await addStaffSalary(add); setAdd({ name: '', role: 'chef', monthly_amount: '' }); onReload()
+  }
+  const saveAmt = async (id) => { await updateStaffSalary(id, { monthly_amount: Number(editAmt) || 0 }); setEditId(null); onReload() }
+  const removeStaff = async (id) => { if (confirm('Remove from payroll? Past salary entries stay in expenses.')) { await deleteStaffSalary(id); onReload() } }
+  const pay = async (s) => {
+    await addExpense({ type: 'salary', label: s.name, amount: s.monthly_amount, date: data.start, note: 'monthly' })
+    onReload()
+  }
+  const payAll = async () => {
+    for (const s of data.staffSalaries.filter((x) => x.active && !paidThisCycle(x.name) && Number(x.monthly_amount) > 0)) {
+      await addExpense({ type: 'salary', label: s.name, amount: s.monthly_amount, date: data.start, note: 'monthly' })
+    }
+    onReload()
+  }
+  const addHelper = async () => {
+    if (!helper.name.trim() || !helper.amount) return
+    await addExpense({ type: 'salary', label: helper.name.trim(), amount: helper.amount, date: helper.date || data.start, note: 'one-day' })
+    setHelper({ name: '', amount: '', date: data.start }); onReload()
+  }
+
+  const roster = data.staffSalaries || []
+  const remaining = roster.filter((s) => s.active && !paidThisCycle(s.name) && Number(s.monthly_amount) > 0)
+
+  return (
+    <Card className="overflow-hidden">
+      <button onClick={() => setOpen((o) => !o)} className="flex w-full items-center justify-between p-4 text-left">
+        <span className="flex items-center gap-2"><Users size={18} className="text-cafe-accent" /><span className="font-bold">Salaries &amp; labour</span>
+          <Badge className="bg-red-500/15 text-red-400">{rupees(data.salaryTotal)}</Badge></span>
+        <ChevronDown size={18} className={`text-cafe-muted transition ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="space-y-4 border-t border-cafe-line p-4 text-sm">
+          <p className="text-xs text-cafe-muted">Set each chef's monthly pay once, then tap Pay to add it to this cycle ({data.periodLabel}). Use One day helper for one off labour.</p>
+
+          {/* Roster */}
+          <div className="space-y-2">
+            {roster.length === 0 && <p className="text-cafe-muted">No staff on payroll yet. Add your chefs below.</p>}
+            {roster.map((s) => (
+              <div key={s.id} className="flex items-center gap-2 rounded-xl bg-cafe-bg p-2.5">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-semibold">{s.name} <span className="text-xs font-normal text-cafe-muted">{s.role}</span></p>
+                  {editId === s.id ? (
+                    <div className="mt-1 flex items-center gap-1">
+                      <span className="text-xs text-cafe-muted">₹</span>
+                      <input type="number" min="0" value={editAmt} onChange={(e) => setEditAmt(e.target.value)}
+                        className="w-24 rounded-lg bg-cafe-card border border-cafe-line px-2 py-1 text-sm" />
+                      <button onClick={() => saveAmt(s.id)} className="text-emerald-400"><Check size={16} /></button>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-cafe-muted">{rupees(s.monthly_amount)}/month
+                      <button onClick={() => { setEditId(s.id); setEditAmt(String(s.monthly_amount)) }} className="ml-2 text-cafe-muted hover:text-white"><Pencil size={12} className="inline" /></button>
+                    </p>
+                  )}
+                </div>
+                {paidThisCycle(s.name)
+                  ? <span className="flex items-center gap-1 text-xs text-emerald-400"><Check size={14} /> Paid</span>
+                  : <Button className="px-3 py-1.5" onClick={() => pay(s)} disabled={!Number(s.monthly_amount)}>Pay</Button>}
+                <button onClick={() => removeStaff(s.id)} className="text-cafe-muted hover:text-red-400"><Trash2 size={14} /></button>
+              </div>
+            ))}
+            {remaining.length > 1 && (
+              <Button variant="ghost" className="w-full" onClick={payAll}>Pay all remaining ({rupees(remaining.reduce((s, x) => s + Number(x.monthly_amount), 0))})</Button>
+            )}
+          </div>
+
+          {/* Add to payroll */}
+          <div className="rounded-xl border border-cafe-line bg-cafe-bg p-3">
+            <p className="mb-2 font-semibold">Add staff to payroll</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <input placeholder="Name" value={add.name} onChange={setA('name')} className="min-w-0 flex-1 rounded-lg bg-cafe-card border border-cafe-line px-2 py-1.5" />
+              <select value={add.role} onChange={setA('role')} className="rounded-lg bg-cafe-card border border-cafe-line px-2 py-1.5 text-sm">
+                <option value="chef">chef</option><option value="helper">helper</option><option value="rider">rider</option><option value="cleaner">cleaner</option><option value="other">other</option>
+              </select>
+              <input type="number" min="0" placeholder="₹/month" value={add.monthly_amount} onChange={setA('monthly_amount')} className="w-24 rounded-lg bg-cafe-card border border-cafe-line px-2 py-1.5" />
+              <Button className="px-3 py-1.5" onClick={addStaff}><Plus size={14} /></Button>
+            </div>
+          </div>
+
+          {/* One day helper */}
+          <div className="rounded-xl border border-cafe-line bg-cafe-bg p-3">
+            <p className="mb-2 font-semibold">One day helper / extra labour</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <input placeholder="Name" value={helper.name} onChange={setH('name')} className="min-w-0 flex-1 rounded-lg bg-cafe-card border border-cafe-line px-2 py-1.5" />
+              <input type="number" min="0" placeholder="₹ paid" value={helper.amount} onChange={setH('amount')} className="w-24 rounded-lg bg-cafe-card border border-cafe-line px-2 py-1.5" />
+              <input type="date" value={helper.date} onChange={setH('date')} className="rounded-lg bg-cafe-card border border-cafe-line px-2 py-1.5 text-xs" />
+              <Button className="px-3 py-1.5" onClick={addHelper}><Plus size={14} /></Button>
+            </div>
+          </div>
+
+          <div className="flex justify-between border-t border-cafe-line pt-2 font-bold">
+            <span>Salaries this cycle</span><span className="text-red-400">{rupees(data.salaryTotal)}</span>
+          </div>
+        </div>
+      )}
+    </Card>
+  )
+}
+
 function downloadReport(data, month) {
   const L = []
   L.push(`Mocka Cafe, Report (${data.periodLabel})`)
@@ -353,9 +499,12 @@ function downloadReport(data, month) {
   L.push(`Rent,${data.rent}`)
   L.push(`Electricity,${data.electricity}`)
   L.push(`Cylinders,${data.cylinderTotal}`)
+  L.push(`Salaries & labour,${data.salaryTotal}`)
   L.push(`Other expenses,${data.otherTotal}`)
   L.push(`Total expenses,${data.totalExpenses}`)
   L.push(`NET PROFIT,${data.netProfit}`)
+  L.push(`Plates sold,${data.plates}`)
+  L.push(`Gas per plate,${data.gasPerPlate.toFixed(2)}`)
   L.push(`Cash collected,${data.cashTotal}`)
   L.push(`UPI collected,${data.upiTotal}`)
   L.push('')

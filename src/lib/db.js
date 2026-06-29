@@ -189,14 +189,32 @@ export async function getExpenses(start, end) {
     .gte('expense_date', start).lte('expense_date', end).order('expense_date', { ascending: false })
   return data || []
 }
-export async function addExpense({ type, label = '', qty = 1, amount, date }) {
+export async function addExpense({ type, label = '', qty = 1, amount, date, note = '' }) {
   const { error } = await supabase.from('expenses').insert({
-    type, label, qty: Number(qty) || 1, amount: Number(amount) || 0, expense_date: date,
+    type, label, qty: Number(qty) || 1, amount: Number(amount) || 0, expense_date: date, note,
   })
   if (error) throw error
 }
 export async function deleteExpense(id) {
   await supabase.from('expenses').delete().eq('id', id)
+}
+
+// ---------- Staff salary roster (chefs/helpers; feeds salary expenses) ----------
+export async function getStaffSalaries() {
+  const { data } = await supabase.from('staff_salaries').select('*').order('created_at')
+  return data || []
+}
+export async function addStaffSalary({ name, role = 'chef', monthly_amount }) {
+  const { error } = await supabase.from('staff_salaries')
+    .insert({ name: name.trim(), role, monthly_amount: Number(monthly_amount) || 0 })
+  if (error) throw error
+}
+export async function updateStaffSalary(id, patch) {
+  const { error } = await supabase.from('staff_salaries').update(patch).eq('id', id)
+  if (error) throw error
+}
+export async function deleteStaffSalary(id) {
+  await supabase.from('staff_salaries').delete().eq('id', id)
 }
 
 // ---------- Inventory catalog / shopkeepers ----------
