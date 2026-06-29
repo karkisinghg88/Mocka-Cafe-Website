@@ -148,6 +148,17 @@ export function cycleRange(ym, cycleDay = 1) {
   return { start: iso(startD), end: iso(endD), label: `${lbl(startD)} → ${lbl(nextStartD)}` }
 }
 
+// Short clock time for a timestamp, e.g. "4:05 PM". Null-safe.
+export function clockTime(ts) {
+  if (!ts) return null
+  return new Date(ts).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' })
+}
+// Whole minutes between two timestamps, or null if either is missing.
+export function minutesBetween(a, b) {
+  if (!a || !b) return null
+  return Math.max(0, Math.round((new Date(b) - new Date(a)) / 60000))
+}
+
 export function todayISO() {
   // Local business date (YYYY-MM-DD).
   const d = new Date()
